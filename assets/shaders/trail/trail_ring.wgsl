@@ -5,6 +5,7 @@
     trail_read_point,
     trail_logical_to_physical,
     trail_safe_tangent,
+    TrailPointData,
 }
 
 struct VertexIn {
@@ -20,10 +21,15 @@ struct VertexOut {
     @location(3) trail_length: f32,
 };
 
-fn trail_vertex(logical_index: u32, side: f32) -> VertexOut {
-    var out: VertexOut;
+fn trail_fallback_right(to_camera: vec3<f32>) -> vec3<f32> {
+    var right = cross(to_camera, vec3<f32>(0.0, 1.0, 0.0));
+    if dot(right, right) < 0.000001 {
+        right = cross(to_camera, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    return normalize(right);
+}
 
-    let point = trail_read_point(trail_logical_to_physical(logical_index));
+fn trail_right_for_point(logical_index: u32, point: TrailPointData) -> vec3<f32> {
     let to_camera = normalize(view.world_position - point.position);
 
     var motion_dir = point.velocity;
@@ -31,15 +37,43 @@ fn trail_vertex(logical_index: u32, side: f32) -> VertexOut {
         motion_dir = trail_safe_tangent(logical_index);
     }
 
-    let motion_dir_norm = normalize(motion_dir);
-    var right = cross(motion_dir_norm, to_camera);
+    var right = cross(normalize(motion_dir), to_camera);
     if dot(right, right) < 0.000001 {
-        right = cross(to_camera, vec3<f32>(0.0, 1.0, 0.0));
-        if dot(right, right) < 0.000001 {
-            right = cross(to_camera, vec3<f32>(1.0, 0.0, 0.0));
+        right = trail_fallback_right(to_camera);
+    } else {
+        right = normalize(right);
+    }
+
+    if logical_index > 0u {
+        let prev_index = logical_index - 1u;
+        let prev_point = trail_read_point(trail_logical_to_physical(prev_index));
+        let prev_to_camera = normalize(view.world_position - prev_point.position);
+
+        var prev_motion_dir = prev_point.velocity;
+        if dot(prev_motion_dir, prev_motion_dir) < 0.000001 {
+            prev_motion_dir = trail_safe_tangent(prev_index);
+        }
+
+        var prev_right = cross(normalize(prev_motion_dir), prev_to_camera);
+        if dot(prev_right, prev_right) < 0.000001 {
+            prev_right = trail_fallback_right(prev_to_camera);
+        } else {
+            prev_right = normalize(prev_right);
+        }
+
+        if dot(right, prev_right) < 0.0 {
+            right = -right;
         }
     }
-    right = normalize(right);
+
+    return right;
+}
+
+fn trail_vertex(logical_index: u32, side: f32) -> VertexOut {
+    var out: VertexOut;
+
+    let point = trail_read_point(trail_logical_to_physical(logical_index));
+    let right = trail_right_for_point(logical_index, point);
 
     let len = trail.ring_state.y;
     let base_width = trail.style.x;
