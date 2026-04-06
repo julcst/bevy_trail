@@ -1,0 +1,15 @@
+[package]
+name = "bevy_trail"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance GPU-accelerated trail renderer for Bevy with camera-facing billboards and procedural shader data."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/julianstamm/bevy_trail"
+
+[dependencies]
+bevy = { version = "0.18.1" }
+wgpu = "0.20"
+encase = "0.8"
+
+[dev-dependencies]
+bevy = { version = "0.18.1" }
