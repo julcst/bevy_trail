@@ -12,12 +12,10 @@
 //! use bevy::prelude::*;
 //! use bevy_trail::prelude::*;
 //!
-//! fn main() {
-//!     App::new()
-//!         .add_plugins(DefaultPlugins)
-//!         .add_plugins(TrailPlugin)
-//!         .run();
-//! }
+//! App::new()
+//!     .add_plugins(DefaultPlugins)
+//!     .add_plugins(TrailPlugin)
+//!     .run();
 //! ```
 
 pub mod components;

@@ -59,7 +59,6 @@ fn setup(
         .with_metadata(TrailMetadata {
             base_width: 0.4,
             taper_factor: 0.99,
-            blend_mode: 1,
             custom_0: Vec4::new(0.25, 0.85, 1.0, 1.0),
             custom_1: Vec4::ZERO,
         })

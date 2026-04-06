@@ -16,7 +16,6 @@ fn main() {
         TrailMetadata {
             base_width: 0.2,
             taper_factor: 0.35,
-            blend_mode: 1,
             custom_0: Vec4::new(1.0, 0.5, 0.2, 1.0),
             custom_1: Vec4::ZERO,
         },

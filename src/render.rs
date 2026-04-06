@@ -26,7 +26,10 @@ impl Plugin for TrailRenderPlugin {
         app.add_plugins(MaterialPlugin::<TrailMaterial>::default())
             .init_resource::<TrailStripMeshCache>()
             .add_systems(Startup, preload_trail_shaders)
-            .add_systems(FixedUpdate, (attach_trail_render_entities, upload_trail_buffers));
+            .add_systems(
+                FixedUpdate,
+                (attach_trail_render_entities, upload_trail_buffers),
+            );
     }
 }
 

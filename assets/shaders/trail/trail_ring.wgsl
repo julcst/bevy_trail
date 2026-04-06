@@ -24,9 +24,22 @@ fn trail_vertex(logical_index: u32, side: f32) -> VertexOut {
     var out: VertexOut;
 
     let point = trail_read_point(trail_logical_to_physical(logical_index));
-    let tangent = trail_safe_tangent(logical_index);
     let to_camera = normalize(view.world_position - point.position);
-    let right = normalize(cross(tangent, to_camera));
+
+    var motion_dir = point.velocity;
+    if dot(motion_dir, motion_dir) < 0.000001 {
+        motion_dir = trail_safe_tangent(logical_index);
+    }
+
+    let motion_dir_norm = normalize(motion_dir);
+    var right = cross(motion_dir_norm, to_camera);
+    if dot(right, right) < 0.000001 {
+        right = cross(to_camera, vec3<f32>(0.0, 1.0, 0.0));
+        if dot(right, right) < 0.000001 {
+            right = cross(to_camera, vec3<f32>(1.0, 0.0, 0.0));
+        }
+    }
+    right = normalize(right);
 
     let len = trail.ring_state.y;
     let base_width = trail.style.x;
@@ -68,9 +81,9 @@ fn vertex(in: VertexIn) -> VertexOut {
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    let edge = smoothstep(1.0, 0.25, abs(in.side));
+    let edge = smoothstep(1.0, 0.0, abs(in.side));
     let fade = in.age;
     let alpha = in.color.a * edge * fade;
-    let rgb = in.color.rgb * (0.25 + 2.0 * fade);
-    return vec4<f32>(rgb, alpha);
+    let rgb = vec3<f32>(1.0, 0.0, 0.0) * edge * fade;
+    return vec4<f32>(rgb, 0.0);
 }

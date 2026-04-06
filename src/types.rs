@@ -10,8 +10,6 @@ pub struct TrailMetadata {
     pub base_width: f32,
     /// How much width tapers toward the oldest trail point (0.0 = no taper, 1.0 = to point).
     pub taper_factor: f32,
-    /// Blend mode: 0 = alpha-blend, 1 = additive.
-    pub blend_mode: u32,
     /// Custom metadata slot 0 (e.g., owner player ID).
     pub custom_0: Vec4,
     /// Custom metadata slot 1 (e.g., gameplay state flags).
@@ -23,7 +21,6 @@ impl Default for TrailMetadata {
         Self {
             base_width: 0.2,
             taper_factor: 0.3,
-            blend_mode: 0, // alpha blend
             custom_0: Vec4::ZERO,
             custom_1: Vec4::ZERO,
         }
