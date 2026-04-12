@@ -1,7 +1,7 @@
 //! Core data types for trail rendering.
 
 use bevy::{
-    camera::visibility,
+    camera::visibility::{self, VisibilityClass},
     prelude::*,
     render::{
         extract_component::ExtractComponent,
@@ -54,7 +54,7 @@ pub struct TrailHeader {
 }
 
 #[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent)]
-#[require(Visibility)]
+#[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<TrailData>)]
 pub struct TrailData {
     #[uniform(0)]
