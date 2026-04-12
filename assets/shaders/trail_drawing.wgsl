@@ -1,14 +1,6 @@
 // #import bevy_pbr::mesh_view_bindings::view
 
-struct VertexIn {
-    @builtin(vertex_index) index: u32,
-};
-
-struct VertexOut {
-    @builtin(position) clip_pos: vec4<f32>,
-};
-
-struct Trail {
+struct Header {
     head: u32,
     length: u32,
     capacity: u32,
@@ -19,7 +11,7 @@ struct TrailPoint {
     width: f32,
     color: vec4f,
     velocity: vec3f,
-    length: f32,
+    t: f32,
 };
 
 struct TrailStyle {
@@ -28,23 +20,33 @@ struct TrailStyle {
     profile: u32,
 };
 
-@group(0) @binding(0) var<uniform> trail: Trail;
-@group(0) @binding(1) var<storage, read> trail_points: array<TrailPoint>;
+@group(0) @binding(0) var<uniform> header: Header;
+@group(0) @binding(1) var<storage, read> data: array<TrailPoint>;
 @group(0) @binding(2) var<uniform> style: TrailStyle;
 
-fn create_vert(x: f32, y: f32) -> VertexOut {
-    return VertexOut(vec4<f32>(x, y, 0.0, 1.0));
+struct VertexOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+fn create_vert(p: TrailPoint, side: bool) -> VertexOut {
+    let right = cross(normalize(p.velocity), vec3f(0.0, 0.0, -1.0));
+    let width = p.width;
+    return VertexOut(
+        vec4f(p.position + select(-width, width, side) * right, 1.0),
+        p.color
+    );
 }
 
 @vertex
-fn vertex(in: VertexIn) -> VertexOut {
-    let side = in.index % 2u == 0u;
-    let idx = in.index / 2u;
-    let point = trail_points[idx];
-    return create_vert(point.position.x, point.position.y + select(-0.1, 0.1, side));
+fn vertex(@builtin(vertex_index) vidx: u32) -> VertexOut {
+    let side = vidx % 2u == 0u;
+    let idx = vidx / 2u;
+    let point = data[(header.head - idx - 1 + header.capacity) % header.capacity];
+    return create_vert(point, side);
 }
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    return in.color;
 }
