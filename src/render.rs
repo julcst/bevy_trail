@@ -178,7 +178,7 @@ fn queue_custom_phase_item(
             // with the exception of number of MSAA samples.
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, CustomPhaseKey(*msaa))
+                .specialize(&pipeline_cache, TrailPipelineKey { msaa: *msaa })
             else {
                 continue;
             };
@@ -216,12 +216,10 @@ fn queue_custom_phase_item(
     }
 }
 
-struct TrailRenderSpecializer;
-
 #[derive(Resource)]
 struct TrailPipeline {
     /// the `variants` collection holds onto the shader handle through the base descriptor
-    variants: Variants<RenderPipeline, TrailRenderSpecializer>,
+    variants: Variants<RenderPipeline, TrailPipelineSpecializer>,
 }
 
 impl FromWorld for TrailPipeline {
@@ -241,6 +239,8 @@ impl FromWorld for TrailPipeline {
             },
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                polygon_mode: PolygonMode::Line,
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -267,24 +267,28 @@ impl FromWorld for TrailPipeline {
             ..default()
         };
 
-        let variants = Variants::new(TrailRenderSpecializer, base_descriptor);
+        let variants = Variants::new(TrailPipelineSpecializer, base_descriptor);
 
         Self { variants }
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
-struct CustomPhaseKey(Msaa);
+struct TrailPipelineKey {
+    msaa: Msaa,
+}
 
-impl Specializer<RenderPipeline> for TrailRenderSpecializer {
-    type Key = CustomPhaseKey;
+struct TrailPipelineSpecializer;
+
+impl Specializer<RenderPipeline> for TrailPipelineSpecializer {
+    type Key = TrailPipelineKey;
 
     fn specialize(
         &self,
         key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
-        descriptor.multisample.count = key.0.samples();
+        descriptor.multisample.count = key.msaa.samples();
         Ok(key)
     }
 }
