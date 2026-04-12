@@ -18,13 +18,10 @@
 //!     .run();
 //! ```
 
-pub mod components;
-pub mod plugin;
+pub mod emitter;
 pub mod render;
 pub mod types;
 
 pub mod prelude {
-    pub use crate::components::{Trail, TrailEmitter, TrailEmitterConfig};
-    pub use crate::plugin::TrailPlugin;
-    pub use crate::types::{TrailMetadata, TrailPoint, TrailSamplingConfig};
+    
 }

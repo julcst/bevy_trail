@@ -1,206 +1,290 @@
-//! Render-world pipeline for trail rendering.
+//! Demonstrates how to enqueue custom draw commands in a render phase.
 //!
-//! This module handles GPU-side rendering of trails, including:
-//! - Per-trail GPU buffer management
-//! - Vertex shader expansion and billboard facing
-//! - Fragment shader procedural effects
+//! This example shows how to use the built-in
+//! [`bevy_render::render_phase::BinnedRenderPhase`] functionality with a
+//! custom [`RenderCommand`] to allow inserting arbitrary GPU drawing logic
+//! into Bevy's pipeline. This is not the only way to add custom rendering code
+//! into Bevy—render nodes are another, lower-level method—but it does allow
+//! for better reuse of parts of Bevy's built-in mesh rendering logic.
 
-use crate::components::Trail;
-use bevy::asset::RenderAssetUsages;
-use bevy::camera::visibility::NoFrustumCulling;
-use bevy::mesh::PrimitiveTopology;
-use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
-use bevy::prelude::*;
-use bevy::reflect::TypePath;
-use bevy::render::render_resource::{
-    AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+use crate::types::{TrailHeader, TrailPoint, TrailStyle};
+use bevy::{
+    camera::visibility::{self, VisibilityClass},
+    core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
+    ecs::{
+        change_detection::Tick,
+        query::ROQueryItem,
+        system::{lifetimeless::Read, StaticSystemParam, SystemParamItem},
+    },
+    mesh::PrimitiveTopology,
+    prelude::*,
+    render::{
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
+        render_phase::{
+            AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
+            RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
+            ViewBinnedRenderPhases,
+        },
+        render_resource::{
+            AsBindGroup, BindGroup, Canonical, ColorTargetState, ColorWrites, CompareFunction,
+            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
+            RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat, Variants,
+            VertexState,
+        },
+        renderer::RenderDevice,
+        storage::ShaderStorageBuffer,
+        view::{ExtractedView, RenderVisibleEntities},
+        Render, RenderApp, RenderSystems,
+    },
 };
-use bevy::render::storage::ShaderStorageBuffer;
-use bevy::shader::ShaderRef;
-use std::collections::HashMap;
+
+/// A [`RenderCommand`] that binds the vertex and index buffers and issues the
+/// draw command for our custom phase item.
+struct DrawTrail;
+
+impl<P> RenderCommand<P> for DrawTrail
+where
+    P: PhaseItem,
+{
+    type Param = ();
+
+    type ViewQuery = ();
+
+    type ItemQuery = Read<GpuTrail>;
+
+    fn render<'w>(
+        _item: &P,
+        _view: ROQueryItem<'w, '_, Self::ViewQuery>,
+        bind_group: Option<&'w GpuTrail>,
+        _param: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let Some(bg) = bind_group else {
+            return RenderCommandResult::Failure("BindGroup missing");
+        };
+
+        pass.set_bind_group(0, &bg.value, &[]);
+        pass.draw(0..bg.vertex_count, 0..1);
+
+        RenderCommandResult::Success
+    }
+}
+
+#[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent)]
+#[require(VisibilityClass)]
+#[component(on_add = visibility::add_visibility_class::<TrailData>)]
+pub struct TrailData {
+    #[uniform(0)]
+    pub header: TrailHeader,
+    #[storage(1, read_only)]
+    pub data: Handle<ShaderStorageBuffer>,
+    #[uniform(2)]
+    pub style: TrailStyle,
+}
+
+#[derive(Component)]
+pub struct GpuTrail {
+    pub value: BindGroup,
+    pub vertex_count: u32,
+}
+
+fn prepare_trail_bind_groups(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    mut param: StaticSystemParam<<TrailData as AsBindGroup>::Param>,
+    // Query the materials we just extracted
+    query: Query<(Entity, &TrailData), Without<GpuTrail>>,
+) {
+    for (entity, trail) in query.iter() {
+        let layout_descriptor = TrailData::bind_group_layout_descriptor(&render_device);
+
+        if let Ok(prepared) = trail.as_bind_group(
+            &layout_descriptor,
+            &render_device,
+            &pipeline_cache,
+            &mut param,
+        ) {
+            commands.entity(entity).insert(GpuTrail {
+                value: prepared.bind_group,
+                vertex_count: trail.header.length * 2, // 2 vertices per point
+            });
+        }
+    }
+}
+
+/// The custom draw commands that Bevy executes for each entity we enqueue into
+/// the render phase.
+type DrawTrailCommands = (
+    SetItemPipeline,
+    // SetMeshViewBindGroup<0>,
+    DrawTrail,
+);
 
 pub struct TrailRenderPlugin;
 
 impl Plugin for TrailRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<TrailMaterial>::default())
-            .init_resource::<TrailStripMeshCache>()
-            .add_systems(Startup, preload_trail_shaders)
+        // Main World
+        app.init_asset::<TrailData>()
+            .add_plugins((ExtractComponentPlugin::<TrailData>::default(),));
+
+        // Render World
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app
+            .add_render_command::<Opaque3d, DrawTrailCommands>()
             .add_systems(
-                FixedUpdate,
-                (attach_trail_render_entities, upload_trail_buffers),
+                Render,
+                (
+                    queue_custom_phase_item.in_set(RenderSystems::Queue),
+                    prepare_trail_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                ),
             );
     }
+
+    fn finish(&self, app: &mut App) {
+        // CustomPhasePipeline needs RenderDevice to be created, which doesn't happen until App::run
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app.init_resource::<TrailPipeline>();
+    }
 }
+
+/// A render-world system that enqueues the entity with custom rendering into
+/// the opaque render phases of each view.
+fn queue_custom_phase_item(
+    pipeline_cache: Res<PipelineCache>,
+    mut pipeline: ResMut<TrailPipeline>,
+    mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
+    opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
+    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    mut next_tick: Local<Tick>,
+) {
+    let draw_custom_phase_item = opaque_draw_functions.read().id::<DrawTrailCommands>();
+
+    // Render phases are per-view, so we need to iterate over all views so that
+    // the entity appears in them. (In this example, we have only one view, but
+    // it's good practice to loop over all views anyway.)
+    for (view, view_visible_entities, msaa) in views.iter() {
+        let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
+            continue;
+        };
+
+        // Find all the custom rendered entities that are visible from this
+        // view.
+        for &entity in view_visible_entities.get::<TrailData>().iter() {
+            // Ordinarily, the [`SpecializedRenderPipeline::Key`] would contain
+            // some per-view settings, such as whether the view is HDR, but for
+            // simplicity's sake we simply hard-code the view's characteristics,
+            // with the exception of number of MSAA samples.
+            let Ok(pipeline_id) = pipeline
+                .variants
+                .specialize(&pipeline_cache, CustomPhaseKey(*msaa))
+            else {
+                continue;
+            };
+
+            // Bump the change tick in order to force Bevy to rebuild the bin.
+            let this_tick = next_tick.get() + 1;
+            next_tick.set(this_tick);
+
+            // Add the custom render item. We use the
+            // [`BinnedRenderPhaseType::NonMesh`] type to skip the special
+            // handling that Bevy has for meshes (preprocessing, indirect
+            // draws, etc.)
+            //
+            // The asset ID is arbitrary; we simply use [`AssetId::invalid`],
+            // but you can use anything you like. Note that the asset ID need
+            // not be the ID of a [`Mesh`].
+            opaque_phase.add(
+                Opaque3dBatchSetKey {
+                    draw_function: draw_custom_phase_item,
+                    pipeline: pipeline_id,
+                    material_bind_group_index: None,
+                    lightmap_slab: None,
+                    vertex_slab: default(),
+                    index_slab: None,
+                },
+                Opaque3dBinKey {
+                    asset_id: AssetId::<Mesh>::invalid().untyped(),
+                },
+                entity,
+                InputUniformIndex::default(),
+                BinnedRenderPhaseType::NonMesh,
+                *next_tick,
+            );
+        }
+    }
+}
+
+struct TrailRenderSpecializer;
 
 #[derive(Resource)]
-struct TrailShaderHandles {
-    #[allow(dead_code)]
-    common: Handle<Shader>,
-    #[allow(dead_code)]
-    ring: Handle<Shader>,
+struct TrailPipeline {
+    /// the `variants` collection holds onto the shader handle through the base descriptor
+    variants: Variants<RenderPipeline, TrailRenderSpecializer>,
 }
 
-fn preload_trail_shaders(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(TrailShaderHandles {
-        common: asset_server.load("shaders/trail/trail_common.wgsl"),
-        ring: asset_server.load("shaders/trail/trail_ring.wgsl"),
-    });
+impl FromWorld for TrailPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let asset_server = world.resource::<AssetServer>();
+        let shader = asset_server.load("shaders/trail_drawing.wgsl");
+        let render_device = world.resource::<RenderDevice>();
+        let material_layout = TrailData::bind_group_layout_descriptor(render_device);
+
+        let base_descriptor = RenderPipelineDescriptor {
+            label: Some("custom render pipeline".into()),
+            layout: vec![material_layout],
+            vertex: VertexState {
+                shader: shader.clone(),
+                // No buffers
+                ..default()
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                ..default()
+            },
+            fragment: Some(FragmentState {
+                shader: shader.clone(),
+                targets: vec![Some(ColorTargetState {
+                    // Ordinarily, you'd want to check whether the view has the
+                    // HDR format and substitute the appropriate texture format
+                    // here, but we omit that for simplicity.
+                    format: TextureFormat::bevy_default(),
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+                ..default()
+            }),
+            // Note that if your view has no depth buffer this will need to be
+            // changed.
+            depth_stencil: Some(DepthStencilState {
+                format: CORE_3D_DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::Always,
+                stencil: default(),
+                bias: default(),
+            }),
+            ..default()
+        };
+
+        let variants = Variants::new(TrailRenderSpecializer, base_descriptor);
+
+        Self { variants }
+    }
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct TrailMaterial {
-    #[uniform(0)]
-    pub uniforms: TrailUniforms,
-    #[storage(1, read_only)]
-    pub points: Handle<ShaderStorageBuffer>,
-}
+#[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
+struct CustomPhaseKey(Msaa);
 
-impl Material for TrailMaterial {
-    fn vertex_shader() -> ShaderRef {
-        "shaders/trail/trail_ring.wgsl".into()
-    }
-
-    fn fragment_shader() -> ShaderRef {
-        "shaders/trail/trail_ring.wgsl".into()
-    }
-
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Add
-    }
+impl Specializer<RenderPipeline> for TrailRenderSpecializer {
+    type Key = CustomPhaseKey;
 
     fn specialize(
-        _pipeline: &MaterialPipeline,
+        &self,
+        key: Self::Key,
         descriptor: &mut RenderPipelineDescriptor,
-        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // Triangle strips flip winding every triangle; disable face culling.
-        descriptor.primitive.cull_mode = None::<Face>;
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, ShaderType)]
-pub struct TrailUniforms {
-    pub ring_state: UVec4,
-    pub style: Vec4,
-    pub custom_a: Vec4,
-    pub custom_b: Vec4,
-}
-
-impl TrailUniforms {
-    pub fn from_trail(trail: &Trail) -> Self {
-        Self {
-            ring_state: UVec4::new(trail.head, trail.len, trail.capacity, 0),
-            style: Vec4::new(
-                trail.metadata.base_width,
-                trail.metadata.taper_factor,
-                0.0,
-                0.0,
-            ),
-            custom_a: trail.metadata.custom_0,
-            custom_b: trail.metadata.custom_1,
-        }
-    }
-}
-
-#[derive(Resource, Default)]
-pub struct TrailStripMeshCache {
-    by_capacity: HashMap<u32, Handle<Mesh>>,
-}
-
-pub fn trail_strip_mesh_for_capacity(
-    capacity: u32,
-    meshes: &mut Assets<Mesh>,
-    cache: &mut TrailStripMeshCache,
-) -> Handle<Mesh> {
-    if let Some(existing) = cache.by_capacity.get(&capacity) {
-        return existing.clone();
-    }
-
-    let vertex_count = (capacity * 2) as usize;
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleStrip,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![Vec3::ZERO; vertex_count]);
-
-    let handle = meshes.add(mesh);
-    cache.by_capacity.insert(capacity, handle.clone());
-    handle
-}
-
-pub fn pack_points_for_gpu(trail: &Trail) -> Vec<[f32; 4]> {
-    // 3 vec4 values per point:
-    // [pos.xyz, width], [color.rgba], [velocity.xyz, cumulative_length]
-    let mut out = vec![[0.0; 4]; (trail.capacity as usize) * 3];
-    for i in 0..trail.capacity as usize {
-        let p = trail.points[i];
-        out[i * 3] = [p.position.x, p.position.y, p.position.z, p.width];
-        out[i * 3 + 1] = [p.color.x, p.color.y, p.color.z, p.color.w];
-        out[i * 3 + 2] = [
-            p.velocity.x,
-            p.velocity.y,
-            p.velocity.z,
-            p.cumulative_length,
-        ];
-    }
-    out
-}
-
-fn attach_trail_render_entities(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut cache: ResMut<TrailStripMeshCache>,
-    trails: Query<(Entity, &Trail), Added<Trail>>,
-) {
-    for (entity, trail) in &trails {
-        let mesh = trail_strip_mesh_for_capacity(trail.capacity, &mut meshes, &mut cache);
-        let render_entity = commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(trail.material.clone()),
-                Transform::IDENTITY,
-                Visibility::default(),
-                InheritedVisibility::default(),
-                ViewVisibility::default(),
-                NoFrustumCulling,
-            ))
-            .id();
-        commands.entity(entity).add_child(render_entity);
-    }
-}
-
-fn upload_trail_buffers(
-    mut trails: Query<&mut Trail>,
-    mut materials: ResMut<Assets<TrailMaterial>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
-    for mut trail in &mut trails {
-        if !trail.dirty {
-            continue;
-        }
-
-        if let Some(material) = materials.get_mut(&trail.material) {
-            material.uniforms = TrailUniforms::from_trail(&trail);
-        }
-
-        if let Some(buffer) = buffers.get_mut(&trail.gpu_buffer) {
-            buffer.set_data(pack_points_for_gpu(&trail));
-        }
-
-        trail.dirty = false;
-    }
-}
-
-impl TrailUniforms {
-    pub fn for_config(capacity: u32, metadata: &crate::types::TrailMetadata) -> Self {
-        Self {
-            ring_state: UVec4::new(0, 0, capacity, 0),
-            style: Vec4::new(metadata.base_width, metadata.taper_factor, 0.0, 0.0),
-            custom_a: metadata.custom_0,
-            custom_b: metadata.custom_1,
-        }
+    ) -> Result<Canonical<Self::Key>, BevyError> {
+        descriptor.multisample.count = key.0.samples();
+        Ok(key)
     }
 }

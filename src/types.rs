@@ -26,16 +26,7 @@ pub struct TrailPoint {
 }
 
 #[derive(Clone, Debug, ShaderType)]
-pub struct TrailSampling {
-    /// Distance threshold; sample if traveled this far since last sample.
-    pub distance_threshold: f32,
-    /// Maximum number of points to store in the trail.
-    pub max_points: u32,
-    pub max_length: f32,
-}
-
-#[derive(Clone, Debug, ShaderType)]
-pub struct TrailUniforms {
+pub struct TrailHeader {
     pub head: u32,
     pub length: u32,
     pub capacity: u32,

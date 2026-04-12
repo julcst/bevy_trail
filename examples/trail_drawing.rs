@@ -39,7 +39,7 @@ use bevy::{
         Render, RenderApp, RenderSystems,
     },
 };
-use bevy_trail::types::{TrailPoint, TrailStyle, TrailUniforms};
+use bevy_trail::types::{TrailHeader, TrailPoint, TrailStyle};
 
 /// The entry point.
 fn main() {
@@ -48,7 +48,6 @@ fn main() {
         .add_systems(Startup, setup);
     app.run();
 }
-
 
 /// A [`RenderCommand`] that binds the vertex and index buffers and issues the
 /// draw command for our custom phase item.
@@ -87,7 +86,7 @@ where
 #[component(on_add = visibility::add_visibility_class::<Trail>)]
 struct Trail {
     #[uniform(0)]
-    trail: TrailUniforms,
+    trail: TrailHeader,
     #[storage(1, read_only)]
     trail_points: Handle<ShaderStorageBuffer>,
     vertex_count: u32,
@@ -139,9 +138,8 @@ pub struct TrailRenderPlugin;
 impl Plugin for TrailRenderPlugin {
     fn build(&self, app: &mut App) {
         // Main World
-        app.init_asset::<Trail>().add_plugins((
-            ExtractComponentPlugin::<Trail>::default(),
-        ));
+        app.init_asset::<Trail>()
+            .add_plugins((ExtractComponentPlugin::<Trail>::default(),));
 
         // Render World
         let render_app = app.sub_app_mut(RenderApp);
@@ -189,7 +187,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         },
     ];
 
-    let trail = TrailUniforms {
+    let trail = TrailHeader {
         head: 0,
         length: 3,
         capacity: 3,
@@ -239,9 +237,7 @@ fn queue_custom_phase_item(
     views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
     mut next_tick: Local<Tick>,
 ) {
-    let draw_custom_phase_item = opaque_draw_functions
-        .read()
-        .id::<DrawTrailCommands>();
+    let draw_custom_phase_item = opaque_draw_functions.read().id::<DrawTrailCommands>();
 
     // Render phases are per-view, so we need to iterate over all views so that
     // the entity appears in them. (In this example, we have only one view, but
