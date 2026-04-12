@@ -7,7 +7,7 @@
 //! into Bevy—render nodes are another, lower-level method—but it does allow
 //! for better reuse of parts of Bevy's built-in mesh rendering logic.
 
-use crate::types::{TrailHeader, TrailPoint, TrailStyle};
+use crate::types::{TrailData, TrailHeader, TrailPoint, TrailStyle};
 use bevy::{
     camera::visibility::{self, VisibilityClass},
     core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
@@ -27,9 +27,9 @@ use bevy::{
         },
         render_resource::{
             AsBindGroup, BindGroup, Canonical, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
-            RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat, Variants,
-            VertexState,
+            DepthStencilState, FragmentState, PipelineCache, PolygonMode, PrimitiveState,
+            RenderPipeline, RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat,
+            Variants, VertexState,
         },
         renderer::RenderDevice,
         storage::ShaderStorageBuffer,
@@ -68,18 +68,6 @@ where
 
         RenderCommandResult::Success
     }
-}
-
-#[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent)]
-#[require(VisibilityClass)]
-#[component(on_add = visibility::add_visibility_class::<TrailData>)]
-pub struct TrailData {
-    #[uniform(0)]
-    pub header: TrailHeader,
-    #[storage(1, read_only)]
-    pub data: Handle<ShaderStorageBuffer>,
-    #[uniform(2)]
-    pub style: TrailStyle,
 }
 
 #[derive(Component)]

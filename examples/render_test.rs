@@ -6,8 +6,8 @@ use bevy::{
     render::storage::ShaderStorageBuffer,
 };
 use bevy_trail::{
-    render::{TrailData, TrailRenderPlugin},
-    types::{TrailHeader, TrailPoint, TrailStyle},
+    render::TrailRenderPlugin,
+    types::{TrailData, TrailHeader, TrailPoint, TrailStyle},
 };
 
 fn main() {
@@ -21,7 +21,7 @@ fn main() {
 fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
     // Generate sine wave
     let n = 128;
-    let data = (0..n)
+    let cpu_data = (0..n)
         .map(|i| {
             let t = i as f32 / (n as f32 - 1.0);
             TrailPoint {
@@ -46,7 +46,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         profile: 0,
     };
 
-    let data = buffers.add(ShaderStorageBuffer::from(data));
+    let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
 
     // Spawn a single entity that has custom rendering. It'll be extracted into
     // the render world via [`ExtractComponent`].
@@ -62,6 +62,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         TrailData {
             header,
             data,
+            cpu_data,
             style,
         },
     ));
