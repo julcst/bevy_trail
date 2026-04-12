@@ -8,8 +8,6 @@ repository = "https://github.com/julianstamm/bevy_trail"
 
 [dependencies]
 bevy = { version = "0.18.1" }
-wgpu = "0.20"
-encase = "0.8"
 
 [dev-dependencies]
-bevy = { version = "0.18.1" }
+bevy = { version = "0.18.1", features = ["debug"] }
