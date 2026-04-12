@@ -38,35 +38,23 @@ use bevy::{
         view::{ExtractedView, RenderVisibleEntities},
         Render, RenderApp, RenderSystems,
     },
-    shader::ShaderRef,
 };
 use bevy_trail::types::{TrailPoint, TrailStyle, TrailUniforms};
 
 /// The entry point.
 fn main() {
     let mut app = App::new();
-    app.add_plugins((DefaultPlugins, CustomTrailRenderPlugin))
+    app.add_plugins((DefaultPlugins, TrailRenderPlugin))
         .add_systems(Startup, setup);
     app.run();
 }
 
-/// A marker component that represents an entity that is to be rendered using
-/// our custom phase item.
-///
-/// Note the [`ExtractComponent`] trait implementation: this is necessary to
-/// tell Bevy that this object should be pulled into the render world. Also note
-/// the `on_add` hook, which is needed to tell Bevy's `check_visibility` system
-/// that entities with this component need to be examined for visibility.
-#[derive(Clone, Component, ExtractComponent)]
-#[require(VisibilityClass)]
-#[component(on_add = visibility::add_visibility_class::<CustomRenderedEntity>)]
-struct CustomRenderedEntity;
 
 /// A [`RenderCommand`] that binds the vertex and index buffers and issues the
 /// draw command for our custom phase item.
-struct DrawCustomPhaseItem;
+struct DrawTrail;
 
-impl<P> RenderCommand<P> for DrawCustomPhaseItem
+impl<P> RenderCommand<P> for DrawTrail
 where
     P: PhaseItem,
 {
@@ -74,68 +62,65 @@ where
 
     type ViewQuery = ();
 
-    type ItemQuery = Read<CustomTrailBindGroup>;
+    type ItemQuery = Read<GpuTrail>;
 
     fn render<'w>(
         _item: &P,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        bind_group: Option<&'w CustomTrailBindGroup>,
-        _custom_phase_item_buffers: SystemParamItem<'w, '_, Self::Param>,
+        bind_group: Option<&'w GpuTrail>,
+        _param: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
         let Some(bg) = bind_group else {
-            return RenderCommandResult::Failure("BindGroup missing".into());
+            return RenderCommandResult::Failure("BindGroup missing");
         };
 
         pass.set_bind_group(0, &bg.value, &[]);
-        pass.draw(0..6, 0..1);
+        pass.draw(0..bg.vertex_count, 0..1);
 
         RenderCommandResult::Success
     }
 }
 
-/// The GPU vertex and index buffers for our custom phase item.
-///
-/// As the custom phase item is a single triangle, these are uploaded once and
-/// then left alone.
-#[derive(Resource)]
-struct CustomPhaseItemBuffers {}
-
 #[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent)]
-#[extract_component_filter(With<CustomRenderedEntity>)]
-struct CustomMaterial {
+#[require(VisibilityClass)]
+#[component(on_add = visibility::add_visibility_class::<Trail>)]
+struct Trail {
     #[uniform(0)]
     trail: TrailUniforms,
     #[storage(1, read_only)]
     trail_points: Handle<ShaderStorageBuffer>,
+    vertex_count: u32,
     #[uniform(2)]
     style: TrailStyle,
 }
 
 #[derive(Component)]
-pub struct CustomTrailBindGroup {
+pub struct GpuTrail {
     pub value: BindGroup,
+    pub vertex_count: u32,
 }
 
 fn prepare_trail_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
-    mut param: StaticSystemParam<<CustomMaterial as AsBindGroup>::Param>,
+    mut param: StaticSystemParam<<Trail as AsBindGroup>::Param>,
     // Query the materials we just extracted
-    query: Query<(Entity, &CustomMaterial), Without<CustomTrailBindGroup>>,
+    query: Query<(Entity, &Trail), Without<GpuTrail>>,
 ) {
-    for (entity, material) in query.iter() {
-        let layout_descriptor = CustomMaterial::bind_group_layout_descriptor(&render_device);
+    for (entity, trail) in query.iter() {
+        let layout_descriptor = Trail::bind_group_layout_descriptor(&render_device);
 
-        if let Ok(prepared) = material.as_bind_group(
+        if let Ok(prepared) = trail.as_bind_group(
             &layout_descriptor,
             &render_device,
             &pipeline_cache,
             &mut param,
         ) {
-            commands.entity(entity).insert(CustomTrailBindGroup {
+            commands.entity(entity).insert(GpuTrail {
                 value: prepared.bind_group,
+                vertex_count: trail.vertex_count,
             });
         }
     }
@@ -143,26 +128,25 @@ fn prepare_trail_bind_groups(
 
 /// The custom draw commands that Bevy executes for each entity we enqueue into
 /// the render phase.
-type DrawCustomPhaseItemCommands = (
+type DrawTrailCommands = (
     SetItemPipeline,
     // SetMeshViewBindGroup<0>,
-    DrawCustomPhaseItem,
+    DrawTrail,
 );
 
-pub struct CustomTrailRenderPlugin;
+pub struct TrailRenderPlugin;
 
-impl Plugin for CustomTrailRenderPlugin {
+impl Plugin for TrailRenderPlugin {
     fn build(&self, app: &mut App) {
         // Main World
-        app.init_asset::<CustomMaterial>().add_plugins((
-            ExtractComponentPlugin::<CustomRenderedEntity>::default(),
-            ExtractComponentPlugin::<CustomMaterial>::default(),
+        app.init_asset::<Trail>().add_plugins((
+            ExtractComponentPlugin::<Trail>::default(),
         ));
 
         // Render World
         let render_app = app.sub_app_mut(RenderApp);
         render_app
-            .add_render_command::<Opaque3d, DrawCustomPhaseItemCommands>()
+            .add_render_command::<Opaque3d, DrawTrailCommands>()
             .add_systems(
                 Render,
                 (
@@ -175,7 +159,7 @@ impl Plugin for CustomTrailRenderPlugin {
     fn finish(&self, app: &mut App) {
         // CustomPhasePipeline needs RenderDevice to be created, which doesn't happen until App::run
         let render_app = app.sub_app_mut(RenderApp);
-        render_app.init_resource::<CustomPhasePipeline>();
+        render_app.init_resource::<TrailPipeline>();
     }
 }
 
@@ -217,6 +201,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         profile: 0,
     };
 
+    let vertex_count = data.len() as u32 * 2;
     let trail_points = buffers.add(ShaderStorageBuffer::from(data));
 
     // Spawn a single entity that has custom rendering. It'll be extracted into
@@ -229,10 +214,10 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
             center: Vec3A::ZERO,
             half_extents: Vec3A::splat(0.5),
         },
-        CustomRenderedEntity,
-        CustomMaterial {
+        Trail {
             trail,
             trail_points: trail_points.clone(),
+            vertex_count,
             style,
         },
     ));
@@ -248,7 +233,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
 /// the opaque render phases of each view.
 fn queue_custom_phase_item(
     pipeline_cache: Res<PipelineCache>,
-    mut pipeline: ResMut<CustomPhasePipeline>,
+    mut pipeline: ResMut<TrailPipeline>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
@@ -256,7 +241,7 @@ fn queue_custom_phase_item(
 ) {
     let draw_custom_phase_item = opaque_draw_functions
         .read()
-        .id::<DrawCustomPhaseItemCommands>();
+        .id::<DrawTrailCommands>();
 
     // Render phases are per-view, so we need to iterate over all views so that
     // the entity appears in them. (In this example, we have only one view, but
@@ -268,7 +253,7 @@ fn queue_custom_phase_item(
 
         // Find all the custom rendered entities that are visible from this
         // view.
-        for &entity in view_visible_entities.get::<CustomRenderedEntity>().iter() {
+        for &entity in view_visible_entities.get::<Trail>().iter() {
             // Ordinarily, the [`SpecializedRenderPipeline::Key`] would contain
             // some per-view settings, such as whether the view is HDR, but for
             // simplicity's sake we simply hard-code the view's characteristics,
@@ -313,20 +298,20 @@ fn queue_custom_phase_item(
     }
 }
 
-struct CustomPhaseSpecializer;
+struct TrailRenderSpecializer;
 
 #[derive(Resource)]
-struct CustomPhasePipeline {
+struct TrailPipeline {
     /// the `variants` collection holds onto the shader handle through the base descriptor
-    variants: Variants<RenderPipeline, CustomPhaseSpecializer>,
+    variants: Variants<RenderPipeline, TrailRenderSpecializer>,
 }
 
-impl FromWorld for CustomPhasePipeline {
+impl FromWorld for TrailPipeline {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         let shader = asset_server.load("shaders/trail_drawing.wgsl");
         let render_device = world.resource::<RenderDevice>();
-        let material_layout = CustomMaterial::bind_group_layout_descriptor(render_device);
+        let material_layout = Trail::bind_group_layout_descriptor(render_device);
 
         let base_descriptor = RenderPipelineDescriptor {
             label: Some("custom render pipeline".into()),
@@ -364,7 +349,7 @@ impl FromWorld for CustomPhasePipeline {
             ..default()
         };
 
-        let variants = Variants::new(CustomPhaseSpecializer, base_descriptor);
+        let variants = Variants::new(TrailRenderSpecializer, base_descriptor);
 
         Self { variants }
     }
@@ -373,7 +358,7 @@ impl FromWorld for CustomPhasePipeline {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
 struct CustomPhaseKey(Msaa);
 
-impl Specializer<RenderPipeline> for CustomPhaseSpecializer {
+impl Specializer<RenderPipeline> for TrailRenderSpecializer {
     type Key = CustomPhaseKey;
 
     fn specialize(
