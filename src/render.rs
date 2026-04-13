@@ -76,13 +76,14 @@ pub struct GpuTrail {
     pub vertex_count: u32,
 }
 
+// TODO: only rebuild bind groups when the data changes
 fn prepare_trail_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     mut param: StaticSystemParam<<TrailData as AsBindGroup>::Param>,
-    // Query the materials we just extracted
-    query: Query<(Entity, &TrailData), Without<GpuTrail>>,
+    // Query extracted trail data and refresh bind groups each frame.
+    query: Query<(Entity, &TrailData), Changed<TrailData>>,
 ) {
     for (entity, trail) in query.iter() {
         let layout_descriptor = TrailData::bind_group_layout_descriptor(&render_device);
@@ -124,8 +125,8 @@ impl Plugin for TrailRenderPlugin {
             .add_systems(
                 Render,
                 (
-                    queue_custom_phase_item.in_set(RenderSystems::Queue),
                     prepare_trail_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    queue_custom_phase_item.in_set(RenderSystems::Queue),
                 ),
             );
     }

@@ -51,14 +51,13 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
     // Spawn a single entity that has custom rendering. It'll be extracted into
     // the render world via [`ExtractComponent`].
     commands.spawn((
-        Visibility::default(),
-        Transform::default(),
         // Note: Aabb would be better
         // Aabb {
         //     center: Vec3A::ZERO,
         //     half_extents: Vec3A::splat(0.5),
         // },
-        NoFrustumCulling,
+        Visibility::Visible,
+        Transform::default(),
         TrailData {
             header,
             data,
