@@ -67,8 +67,9 @@ fn emit_points_system(
             }
 
             // Clip the trail length
-            loop {
-                let end = (trail.header.head + trail.header.capacity - trail.header.length)
+            while trail.header.length > 1 {
+                // We take the point before the end (+1) for smoother tail clipping
+                let end = (trail.header.head + trail.header.capacity - trail.header.length + 1)
                     % trail.header.capacity;
                 let point = &trail.cpu_data[end as usize];
                 if point.length >= trail.header.current_length - trail.header.max_length
