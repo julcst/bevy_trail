@@ -16,7 +16,7 @@ use bevy::{
     ecs::{
         change_detection::Tick,
         query::ROQueryItem,
-        system::{lifetimeless::SRes, SystemParamItem},
+        system::SystemParamItem,
     },
     mesh::PrimitiveTopology,
     prelude::*,
@@ -28,11 +28,10 @@ use bevy::{
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            Canonical, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline, RenderPipelineDescriptor, Specializer, SpecializerKey,
-            TextureFormat, Variants, VertexState,
+            Canonical, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState,
+            FragmentState, PipelineCache, PrimitiveState, RenderPipeline, RenderPipelineDescriptor,
+            Specializer, SpecializerKey, TextureFormat, Variants, VertexState,
         },
-        renderer::{RenderDevice, RenderQueue},
         view::{ExtractedView, RenderVisibleEntities},
         Render, RenderApp, RenderSystems,
     },
@@ -58,7 +57,7 @@ impl<P> RenderCommand<P> for DrawCustomPhaseItem
 where
     P: PhaseItem,
 {
-    type Param = SRes<CustomPhaseItemBuffers>;
+    type Param = ();
 
     type ViewQuery = ();
 
@@ -68,24 +67,14 @@ where
         _: &P,
         _: ROQueryItem<'w, '_, Self::ViewQuery>,
         _: Option<ROQueryItem<'w, '_, Self::ItemQuery>>,
-        custom_phase_item_buffers: SystemParamItem<'w, '_, Self::Param>,
+        _: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        // Borrow check workaround.
-        let custom_phase_item_buffers = custom_phase_item_buffers.into_inner();
-
         pass.draw(0..40, 0..1);
 
         RenderCommandResult::Success
     }
 }
-
-/// The GPU vertex and index buffers for our custom phase item.
-///
-/// As the custom phase item is a single triangle, these are uploaded once and
-/// then left alone.
-#[derive(Resource)]
-struct CustomPhaseItemBuffers {}
 
 /// The custom draw commands that Bevy executes for each entity we enqueue into
 /// the render phase.
@@ -102,10 +91,6 @@ fn main() {
     app.sub_app_mut(RenderApp)
         .init_resource::<CustomPhasePipeline>()
         .add_render_command::<Opaque3d, DrawCustomPhaseItemCommands>()
-        .add_systems(
-            Render,
-            prepare_custom_phase_item_buffers.in_set(RenderSystems::Prepare),
-        )
         .add_systems(Render, queue_custom_phase_item.in_set(RenderSystems::Queue));
 
     app.run();
@@ -131,14 +116,6 @@ fn setup(mut commands: Commands) {
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-}
-
-/// Creates the [`CustomPhaseItemBuffers`] resource.
-///
-/// This must be done in a startup system because it needs the [`RenderDevice`]
-/// and [`RenderQueue`] to exist, and they don't until [`App::run`] is called.
-fn prepare_custom_phase_item_buffers(mut commands: Commands) {
-    commands.init_resource::<CustomPhaseItemBuffers>();
 }
 
 /// A render-world system that enqueues the entity with custom rendering into
@@ -277,14 +254,5 @@ impl Specializer<RenderPipeline> for CustomPhaseSpecializer {
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.multisample.count = key.0.samples();
         Ok(key)
-    }
-}
-
-impl FromWorld for CustomPhaseItemBuffers {
-    fn from_world(world: &mut World) -> Self {
-        let render_device = world.resource::<RenderDevice>();
-        let render_queue = world.resource::<RenderQueue>();
-
-        CustomPhaseItemBuffers {}
     }
 }
