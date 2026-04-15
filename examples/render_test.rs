@@ -26,24 +26,12 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
             let t = i as f32 / (n as f32 - 1.0);
             TrailPoint {
                 position: Vec3::new(t - 0.5, (t * TAU).sin() * 0.5, 0.0),
-                width: 0.05,
-                color: Vec4::new(t, 1.0 - t, 0.5, 1.0),
-                t,
+                time: t,
+                length: t,
+                ..default()
             }
         })
         .collect::<Vec<_>>();
-
-    let header = TrailHeader {
-        head: n - 1,
-        length: n,
-        capacity: n,
-    };
-
-    let style = TrailStyle {
-        taper: 0.5,
-        fade: 0.5,
-        profile: 0,
-    };
 
     let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
 
@@ -58,10 +46,23 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         Visibility::Visible,
         Transform::default(),
         TrailData {
-            header,
+            header: TrailHeader {
+                head: n - 1,
+                length: n,
+                capacity: n,
+                max_length: 1.0,
+                max_time: 1.0,
+                current_length: 1.0,
+                current_time: 1.0,
+            },
             data,
             cpu_data,
-            style,
+            style: TrailStyle {
+                start_color: LinearRgba::WHITE,
+                end_color: LinearRgba::RED,
+                start_width: 0.05,
+                ..default()
+            },
         },
     ));
 

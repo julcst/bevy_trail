@@ -20,38 +20,33 @@ pub enum TrailProfile {
 
 #[derive(Clone, Debug, ShaderType)]
 pub struct TrailStyle {
-    pub taper: f32,
-    pub fade: f32,
+    pub start_color: LinearRgba,
+    pub end_color: LinearRgba,
+    pub start_width: f32,
+    pub end_width: f32,
     pub profile: u32, // TODO: Use enum
 }
 
 impl Default for TrailStyle {
     fn default() -> Self {
         Self {
-            taper: 0.0,
-            fade: 0.0,
+            start_color: LinearRgba::WHITE,
+            end_color: LinearRgba::WHITE,
+            start_width: 1.0,
+            end_width: 0.0,
             profile: 0,
         }
     }
 }
 
-#[derive(Clone, Debug, ShaderType)]
+#[derive(Clone, Debug, ShaderType, Default)]
 pub struct TrailPoint {
     pub position: Vec3,
-    pub width: f32,
-    pub color: Vec4,
-    pub t: f32,
-}
-
-impl Default for TrailPoint {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            width: 0.0,
-            color: Vec4::ZERO,
-            t: 0.0,
-        }
-    }
+    /// Time along trail
+    pub time: f32,
+    pub custom: Vec3,
+    /// Distance along trail
+    pub length: f32,
 }
 
 #[derive(Clone, Debug, ShaderType)]
@@ -60,6 +55,10 @@ pub struct TrailHeader {
     pub head: u32,
     pub length: u32,
     pub capacity: u32,
+    pub current_time: f32,
+    pub max_time: f32,
+    pub current_length: f32,
+    pub max_length: f32,
 }
 
 impl Default for TrailHeader {
@@ -68,6 +67,10 @@ impl Default for TrailHeader {
             head: 0,
             length: 0,
             capacity: 128,
+            current_time: 0.0,
+            max_time: 1.0,
+            current_length: 0.0,
+            max_length: 1.0,
         }
     }
 }

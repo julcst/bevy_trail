@@ -8,62 +8,16 @@ pub struct TrailEmitterPlugin;
 impl Plugin for TrailEmitterPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
-            FixedUpdate,
+            Update,
             (emit_points_system, sync_trail_buffers_system).chain(),
         );
     }
 }
 
-#[derive(Component)]
+#[derive(Component, Default)]
 #[require(TrailData)]
 pub struct TrailEmitter {
-    pub max_points: usize,
-    pub max_length: Option<f32>,
-    pub max_time: Option<f32>,
-    pub distance_threshold: f32,
     pub last: Option<TrailPoint>,
-}
-
-impl Default for TrailEmitter {
-    fn default() -> Self {
-        Self {
-            max_points: 128,
-            max_length: None,
-            max_time: None,
-            distance_threshold: 0.0,
-            last: None,
-        }
-    }
-}
-
-fn add_point(trail: &mut TrailData, point: TrailPoint) {
-    trail
-        .cpu_data
-        .resize_with(trail.header.capacity as usize, Default::default);
-    trail.header.head = (trail.header.head + 1) % trail.header.capacity;
-    trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
-    trail.cpu_data[trail.header.head as usize] = point;
-}
-
-fn set_head(trail: &mut TrailData, point: TrailPoint) {
-    trail.cpu_data[trail.header.head as usize] = point;
-}
-
-impl TrailEmitter {
-    fn emit_point(&mut self, trail: &mut TrailData, point: TrailPoint) {
-        let should_emit = self.last.as_ref().is_none_or(|last| {
-            (point.position - last.position).length_squared()
-                >= self.distance_threshold * self.distance_threshold
-        });
-
-        if should_emit {
-            info!("Emitting {:?}", point.clone());
-            add_point(trail, point.clone());
-            self.last = Some(point);
-        } else {
-            set_head(trail, point);
-        }
-    }
 }
 
 fn emit_points_system(
@@ -74,13 +28,56 @@ fn emit_points_system(
         .par_iter_mut()
         .for_each(|(transform, mut trail, mut emitter)| {
             let position = transform.translation();
+
+            let time = time.elapsed_secs();
+            let length = emitter.last.as_ref().map_or(0.0, |last| {
+                last.length + (position - last.position).length()
+            });
+
             let point = TrailPoint {
                 position,
-                width: 0.1,
-                color: Vec4::ONE,
-                t: time.elapsed_secs(),
+                time,
+                custom: Vec3::ZERO,
+                length,
             };
-            emitter.emit_point(&mut trail, point);
+
+            trail.header.current_time = point.time;
+            trail.header.current_length = point.length;
+
+            let should_emit = emitter.last.as_ref().is_none_or(|last| {
+                let threshold = trail.header.max_length / trail.header.capacity as f32;
+                (position - last.position).length() >= threshold
+            });
+
+            if should_emit {
+                // Increment header
+                let capacity = trail.header.capacity as usize;
+                trail.cpu_data.resize_with(capacity, Default::default);
+                trail.header.head = (trail.header.head + 1) % trail.header.capacity;
+                trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
+
+                // Write new head
+                let head = trail.header.head as usize;
+                trail.cpu_data[head] = point.clone();
+                emitter.last = Some(point);
+            } else {
+                // Overwrite head
+                let head = trail.header.head as usize;
+                trail.cpu_data[head] = point;
+            }
+
+            // Clip the trail length
+            loop {
+                let end = (trail.header.head + trail.header.capacity - trail.header.length)
+                    % trail.header.capacity;
+                let point = &trail.cpu_data[end as usize];
+                if point.length >= trail.header.current_length - trail.header.max_length
+                    || point.time >= trail.header.current_time - trail.header.max_time
+                {
+                    break;
+                }
+                trail.header.length -= 1;
+            }
         });
 }
 

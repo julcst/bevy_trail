@@ -7,9 +7,8 @@
 //! into Bevy—render nodes are another, lower-level method—but it does allow
 //! for better reuse of parts of Bevy's built-in mesh rendering logic.
 
-use crate::types::{TrailData, TrailHeader, TrailPoint, TrailStyle};
+use crate::types::TrailData;
 use bevy::{
-    camera::visibility::{self, VisibilityClass},
     core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
     ecs::{
         change_detection::Tick,
@@ -19,7 +18,7 @@ use bevy::{
     mesh::PrimitiveTopology,
     prelude::*,
     render::{
-        extract_component::{ExtractComponent, ExtractComponentPlugin},
+        extract_component::ExtractComponentPlugin,
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
             RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
@@ -27,12 +26,11 @@ use bevy::{
         },
         render_resource::{
             AsBindGroup, BindGroup, Canonical, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, PolygonMode, PrimitiveState,
-            RenderPipeline, RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat,
-            Variants, VertexState,
+            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
+            RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat, Variants,
+            VertexState,
         },
         renderer::RenderDevice,
-        storage::ShaderStorageBuffer,
         view::{ExtractedView, RenderVisibleEntities},
         Render, RenderApp, RenderSystems,
     },

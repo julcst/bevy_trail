@@ -19,7 +19,7 @@ fn main() {
     App::new()
         .add_plugins((DefaultPlugins, TrailRenderPlugin, TrailEmitterPlugin))
         .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, move_in_circle_system)
+        .add_systems(Update, move_in_circle_system)
         .run();
 }
 
@@ -36,23 +36,21 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
             center: Vec3A::ZERO,
             half_extents: Vec3A::splat(1.5),
         },
-        TrailEmitter {
-            max_points: capacity as usize,
-            distance_threshold: 0.05,
-            ..default()
-        },
+        TrailEmitter::default(),
         TrailData {
             header: TrailHeader {
-                head: 0,
-                length: 0,
                 capacity,
+                max_length: 2.0,
+                max_time: 2.0,
+                ..default()
             },
             data,
             cpu_data,
             style: TrailStyle {
-                taper: 0.4,
-                fade: 0.0,
-                profile: 0,
+                start_color: LinearRgba::WHITE,
+                end_color: LinearRgba::RED,
+                start_width: 0.05,
+                ..default()
             },
         },
         CircleMover {
