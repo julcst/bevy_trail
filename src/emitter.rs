@@ -18,6 +18,8 @@ impl Plugin for TrailEmitterPlugin {
 #[require(TrailData)]
 pub struct TrailEmitter {
     pub last: Option<TrailPoint>,
+    /// If false, the emitter will update the head point every frame even if it doesn't move enough to emit a new point.
+    pub lazy: bool,
 }
 
 fn emit_points_system(
@@ -60,7 +62,7 @@ fn emit_points_system(
                 let head = trail.header.head as usize;
                 trail.cpu_data[head] = point.clone();
                 emitter.last = Some(point);
-            } else {
+            } else if !emitter.lazy {
                 // Overwrite head
                 let head = trail.header.head as usize;
                 trail.cpu_data[head] = point;

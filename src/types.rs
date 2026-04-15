@@ -10,6 +10,11 @@ use bevy::{
     },
 };
 
+pub enum RenderMode {
+    Opaque,
+    Transparent(AlphaMode),
+}
+
 #[derive(Clone, Debug)]
 #[repr(u32)]
 pub enum TrailProfile {
@@ -56,8 +61,10 @@ pub struct TrailHeader {
     pub length: u32,
     pub capacity: u32,
     pub current_time: f32,
+    /// Set to 0 to disable time-based clipping
     pub max_time: f32,
     pub current_length: f32,
+    /// Set to 0 to disable length-based clipping
     pub max_length: f32,
 }
 
