@@ -15,12 +15,13 @@ impl Plugin for TrailEmitterPlugin {
 }
 
 #[derive(Component)]
+#[require(TrailData)]
 pub struct TrailEmitter {
     pub max_points: usize,
     pub max_length: Option<f32>,
     pub max_time: Option<f32>,
     pub distance_threshold: f32,
-    last: Option<TrailPoint>,
+    pub last: Option<TrailPoint>,
 }
 
 impl Default for TrailEmitter {
@@ -39,9 +40,13 @@ fn add_point(trail: &mut TrailData, point: TrailPoint) {
     trail
         .cpu_data
         .resize_with(trail.header.capacity as usize, Default::default);
-    trail.cpu_data[trail.header.head as usize] = point;
     trail.header.head = (trail.header.head + 1) % trail.header.capacity;
     trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
+    trail.cpu_data[trail.header.head as usize] = point;
+}
+
+fn set_head(trail: &mut TrailData, point: TrailPoint) {
+    trail.cpu_data[trail.header.head as usize] = point;
 }
 
 impl TrailEmitter {
@@ -55,6 +60,8 @@ impl TrailEmitter {
             info!("Emitting {:?}", point.clone());
             add_point(trail, point.clone());
             self.last = Some(point);
+        } else {
+            set_head(trail, point);
         }
     }
 }
@@ -67,10 +74,6 @@ fn emit_points_system(
         .par_iter_mut()
         .for_each(|(transform, mut trail, mut emitter)| {
             let position = transform.translation();
-            let velocity = emitter
-                .last
-                .as_ref()
-                .map_or(Vec3::ZERO, |last| position - last.position);
             let point = TrailPoint {
                 position,
                 width: 0.1,
@@ -90,6 +93,5 @@ fn sync_trail_buffers_system(
             .get_mut(&trail.data)
             .unwrap()
             .set_data(trail.cpu_data.clone());
-        info!("Trail data: {:?}", trail);
     });
 }

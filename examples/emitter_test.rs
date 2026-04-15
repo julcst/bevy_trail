@@ -19,12 +19,12 @@ fn main() {
     App::new()
         .add_plugins((DefaultPlugins, TrailRenderPlugin, TrailEmitterPlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, move_in_circle_system)
+        .add_systems(FixedUpdate, move_in_circle_system)
         .run();
 }
 
 fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
-    let capacity = 256;
+    let capacity = 64;
     let cpu_data = vec![TrailPoint::default(); capacity as usize];
     let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
 
@@ -36,7 +36,11 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
             center: Vec3A::ZERO,
             half_extents: Vec3A::splat(1.5),
         },
-        TrailEmitter::default(),
+        TrailEmitter {
+            max_points: capacity as usize,
+            distance_threshold: 0.05,
+            ..default()
+        },
         TrailData {
             header: TrailHeader {
                 head: 0,

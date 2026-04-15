@@ -34,7 +34,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         .collect::<Vec<_>>();
 
     let header = TrailHeader {
-        head: 0,
+        head: n - 1,
         length: n,
         capacity: n,
     };

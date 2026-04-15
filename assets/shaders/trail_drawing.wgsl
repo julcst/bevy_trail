@@ -30,7 +30,7 @@ struct VertexOut {
 };
 
 fn get_point(idx: u32) -> TrailPoint {
-    return data[(header.head + header.capacity - 1u - idx) % header.capacity];
+    return data[(header.head + header.capacity - idx) % header.capacity];
 }
 
 fn calc_curvature(idx: u32) -> vec3f {

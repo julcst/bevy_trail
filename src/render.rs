@@ -229,7 +229,7 @@ impl FromWorld for TrailPipeline {
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleStrip,
                 cull_mode: None,
-                polygon_mode: PolygonMode::Line,
+                // polygon_mode: PolygonMode::Line,
                 ..default()
             },
             fragment: Some(FragmentState {

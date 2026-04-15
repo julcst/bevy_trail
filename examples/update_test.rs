@@ -29,7 +29,6 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         position: Vec3::new(0.5, 0.0, 0.0),
         width: 0.05,
         color: Vec4::new(0.2, 0.9, 0.8, 1.0),
-        velocity: Vec3::Y,
         t: 0.0,
     };
     let cpu_data = vec![initial; n as usize];
@@ -89,6 +88,9 @@ fn animate_trail(
         let cap = trail.header.capacity as usize;
         trail.cpu_data.resize_with(cap, Default::default);
 
+        trail.header.head = (trail.header.head + 1) % trail.header.capacity;
+        trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
+
         let index = trail.header.head as usize;
         trail.cpu_data[index] = TrailPoint {
             position,
@@ -96,9 +98,6 @@ fn animate_trail(
             color: Vec4::new(0.2, 0.9, 0.8, 1.0),
             t,
         };
-
-        trail.header.head = (trail.header.head + 1) % trail.header.capacity;
-        trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
 
         if let Some(buffer) = buffers.get_mut(&trail.data) {
             buffer.set_data(trail.cpu_data.clone());

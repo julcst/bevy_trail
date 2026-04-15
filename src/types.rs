@@ -11,6 +11,7 @@ use bevy::{
 };
 
 #[derive(Clone, Debug)]
+#[repr(u32)]
 pub enum TrailProfile {
     Flat,
     Smooth,
@@ -21,7 +22,17 @@ pub enum TrailProfile {
 pub struct TrailStyle {
     pub taper: f32,
     pub fade: f32,
-    pub profile: u32,
+    pub profile: u32, // TODO: Use enum
+}
+
+impl Default for TrailStyle {
+    fn default() -> Self {
+        Self {
+            taper: 0.0,
+            fade: 0.0,
+            profile: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, ShaderType)]
@@ -51,7 +62,17 @@ pub struct TrailHeader {
     pub capacity: u32,
 }
 
-#[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent)]
+impl Default for TrailHeader {
+    fn default() -> Self {
+        Self {
+            head: 0,
+            length: 0,
+            capacity: 128,
+        }
+    }
+}
+
+#[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent, Default)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<TrailData>)]
 pub struct TrailData {
