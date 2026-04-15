@@ -28,7 +28,6 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
                 position: Vec3::new(t - 0.5, (t * TAU).sin() * 0.5, 0.0),
                 width: 0.05,
                 color: Vec4::new(t, 1.0 - t, 0.5, 1.0),
-                velocity: Vec3::new(1.0, TAU * 0.5 * (t * TAU).cos(), 0.0), // Derivative
                 t,
             }
         })

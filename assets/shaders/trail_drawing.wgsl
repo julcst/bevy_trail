@@ -29,21 +29,40 @@ struct VertexOut {
     @location(0) color: vec4<f32>,
 };
 
-fn create_vert(p: TrailPoint, side: bool) -> VertexOut {
-    let right = cross(normalize(p.velocity), vec3f(0.0, 0.0, -1.0));
-    let width = p.width;
-    return VertexOut(
-        vec4f(p.position + select(-width, width, side) * right, 1.0),
-        p.color
-    );
+fn get_point(idx: u32) -> TrailPoint {
+    return data[(header.head + header.capacity - 1u - idx) % header.capacity];
+}
+
+fn calc_curvature(idx: u32) -> vec3f {
+    let prev = get_point(idx - 1u).position;
+    let curr = get_point(idx).position;
+    let next = get_point(idx + 1u).position;
+    return normalize(prev - 2.0 * curr + next);
+}
+
+fn calc_tangent(idx: u32) -> vec3f {
+    var t: vec3f;
+    if idx == 0u {
+        t = get_point(idx + 1u).position - get_point(idx).position;
+    } else if idx == header.length - 1u {
+        t = get_point(idx).position - get_point(idx - 1u).position;
+    } else {
+        t = get_point(idx + 1u).position - get_point(idx - 1u).position;
+    }
+    return normalize(t);
 }
 
 @vertex
 fn vertex(@builtin(vertex_index) vidx: u32) -> VertexOut {
     let side = vidx % 2u == 0u;
     let idx = vidx / 2u;
-    let point = data[(header.head - idx - 1 + header.capacity) % header.capacity];
-    return create_vert(point, side);
+    let curr = get_point(idx);
+    let forward = calc_tangent(idx);
+    let right = cross(forward, vec3f(0.0, 0.0, 1.0)) * select(-curr.width, curr.width, side);
+    return VertexOut(
+        vec4f(curr.position + right, 1.0),
+        curr.color
+    );
 }
 
 @fragment

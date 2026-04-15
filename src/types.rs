@@ -29,7 +29,6 @@ pub struct TrailPoint {
     pub position: Vec3,
     pub width: f32,
     pub color: Vec4,
-    pub velocity: Vec3,
     pub t: f32,
 }
 
@@ -39,7 +38,6 @@ impl Default for TrailPoint {
             position: Vec3::ZERO,
             width: 0.0,
             color: Vec4::ZERO,
-            velocity: Vec3::ZERO,
             t: 0.0,
         }
     }

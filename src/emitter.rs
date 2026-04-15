@@ -75,7 +75,6 @@ fn emit_points_system(
                 position,
                 width: 0.1,
                 color: Vec4::ONE,
-                velocity,
                 t: time.elapsed_secs(),
             };
             emitter.emit_point(&mut trail, point);

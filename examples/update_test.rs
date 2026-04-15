@@ -84,7 +84,6 @@ fn animate_trail(
     let theta = (t * ANGULAR_SPEED).rem_euclid(2.0 * PI);
 
     let position = Vec3::new(theta.cos() * RADIUS, theta.sin() * RADIUS, 0.0);
-    let velocity = Vec3::new(-theta.sin(), theta.cos(), 0.0) * RADIUS * ANGULAR_SPEED;
 
     for mut trail in &mut trails {
         let cap = trail.header.capacity as usize;
@@ -95,7 +94,6 @@ fn animate_trail(
             position,
             width: 0.05,
             color: Vec4::new(0.2, 0.9, 0.8, 1.0),
-            velocity,
             t,
         };
 
