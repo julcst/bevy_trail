@@ -10,7 +10,7 @@ use std::f32::consts::TAU;
 use bevy::prelude::*;
 use bevy_trail::prelude::*;
 
-const TRAIL_COUNT: usize = 48;
+const TRAIL_COUNT: usize = 42;
 const TRAIL_CAPACITY: u32 = 512;
 const CAMERA_RADIUS: f32 = 6.0;
 
@@ -85,7 +85,7 @@ fn setup(
                 .with_max_time(6.0),
             TrailStyle {
                 start_color: color.into(),
-                end_color: color.with_chroma(0.0).into(),
+                end_color: color.with_alpha(0.0).into(),
                 start_width: 0.015,
                 end_width: 0.0,
                 ..default()

@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use crate::types::{Trail, TrailData, TrailPoint};
+use crate::types::{Trail, TrailData, TrailHeader, TrailPoint};
 
 /// Makes a trail trace the path of its entity automatically.
 ///
@@ -24,6 +24,19 @@ pub struct TrailEmitter {
     /// If false, the emitter updates the head point every frame even when it
     /// hasn't moved far enough to emit a new point.
     pub lazy: bool,
+    /// Minimum world-space distance the entity must travel before a new point
+    /// is emitted. `None` derives a spacing that fills the ring buffer over one
+    /// [`Trail::max_length`](crate::types::Trail) of travel.
+    pub min_distance: Option<f32>,
+}
+
+impl TrailEmitter {
+    /// Resolves the sample spacing, falling back to `max_length / capacity` so a
+    /// default trail keeps roughly `capacity` points across its visible length.
+    fn spacing(&self, header: &TrailHeader) -> f32 {
+        self.min_distance
+            .unwrap_or_else(|| header.max_length / header.capacity.max(1) as f32)
+    }
 }
 
 pub(crate) fn emit_points_system(
@@ -50,10 +63,11 @@ pub(crate) fn emit_points_system(
             trail.header.current_time = point.time;
             trail.header.current_length = point.length;
 
-            let should_emit = emitter.last.as_ref().is_none_or(|last| {
-                let threshold = trail.header.max_length / trail.header.capacity as f32;
-                (position - last.position).length() >= threshold
-            });
+            let spacing = emitter.spacing(&trail.header);
+            let should_emit = emitter
+                .last
+                .as_ref()
+                .is_none_or(|last| (position - last.position).length() >= spacing);
 
             if should_emit {
                 // Increment header
@@ -72,8 +86,10 @@ pub(crate) fn emit_points_system(
                 trail.cpu_data[head] = point;
             }
 
-            // Clip the trail length
-            while trail.header.length > 1 {
+            // Clip the tail. A 0 budget disables that axis; with both disabled
+            // the trail is bounded only by capacity, so skip clipping entirely.
+            let clip = trail.header.max_length > 0.0 || trail.header.max_time > 0.0;
+            while clip && trail.header.length > 1 {
                 // We take the point before the end (+1) for smoother tail clipping
                 let end = (trail.header.head + trail.header.capacity - trail.header.length + 1)
                     % trail.header.capacity;

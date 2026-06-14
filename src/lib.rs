@@ -32,7 +32,9 @@ pub mod emitter;
 pub mod render;
 pub mod types;
 
-use bevy::{camera::primitives::Aabb, prelude::*, render::storage::ShaderStorageBuffer};
+use bevy::{
+    camera::primitives::Aabb, math::Vec3A, prelude::*, render::storage::ShaderStorageBuffer,
+};
 
 use crate::{
     emitter::emit_points_system,
@@ -70,11 +72,14 @@ impl Plugin for TrailPlugin {
                 Update,
                 (TrailSystems::Init, TrailSystems::Emit, TrailSystems::Sync).chain(),
             )
-            .add_systems(Update, init_trails.in_set(TrailSystems::Init))
-            .add_systems(Update, emit_points_system.in_set(TrailSystems::Emit))
             .add_systems(
                 Update,
-                (sync_trail_style, sync_trail_buffers, update_trail_aabb).in_set(TrailSystems::Sync),
+                (
+                    init_trails.in_set(TrailSystems::Init),
+                    emit_points_system.in_set(TrailSystems::Emit),
+                    (sync_trail_style, sync_trail_buffers, update_trail_aabb)
+                        .in_set(TrailSystems::Sync),
+                ),
             );
     }
 }
@@ -137,22 +142,21 @@ fn update_trail_aabb(
 ) {
     for (global, trail, mut aabb) in &mut query {
         let header = &trail.header;
-        if header.length == 0 || header.capacity == 0 {
+        if header.capacity == 0 {
             continue;
         }
 
         let to_local = global.affine().inverse();
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
-
-        for i in 0..header.length {
+        let local_points = (0..header.length).map(|i| {
             let idx = ((header.head + header.capacity - i) % header.capacity) as usize;
-            let local = to_local.transform_point3(trail.cpu_data[idx].position);
-            min = min.min(local);
-            max = max.max(local);
-        }
+            to_local.transform_point3(trail.cpu_data[idx].position)
+        });
 
-        let pad = trail.style.start_width.max(trail.style.end_width).max(0.0);
-        *aabb = Aabb::from_min_max(min - pad, max + pad);
+        if let Some(mut bounds) = Aabb::enclosing(local_points) {
+            // Pad by the trail half-width to cover the ribbon the shader expands.
+            let pad = trail.style.start_width.max(trail.style.end_width).max(0.0);
+            bounds.half_extents += Vec3A::splat(pad);
+            *aabb = bounds;
+        }
     }
 }
