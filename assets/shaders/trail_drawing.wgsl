@@ -34,6 +34,8 @@ struct TrailStyle {
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Signed position across the ribbon width: -1 at one edge, +1 at the other.
+    @location(1) side: f32,
 };
 
 fn get_point(idx: u32) -> TrailPoint {
@@ -74,17 +76,40 @@ fn vertex(@builtin(vertex_index) vidx: u32) -> VertexOut {
     // Build a camera-facing ribbon: offset each point perpendicular to both the
     // trail tangent and the direction from the camera to the point, so the
     // ribbon always faces the camera regardless of view angle.
+    let edge = select(-1.0, 1.0, side);
     let view_dir = normalize(curr.position - view.world_position);
-    let right = normalize(cross(forward, view_dir)) * select(-width, width, side);
+    let right = normalize(cross(forward, view_dir)) * (edge * width);
     let world_pos = curr.position + right;
 
     return VertexOut(
         view.clip_from_world * vec4f(world_pos, 1.0),
-        color
+        color,
+        edge
     );
+}
+
+// Cross-section alpha falloff across the ribbon width, selected by the profile.
+// `u` is the signed distance from the center, in [-1, 1].
+fn profile_alpha(u: f32) -> f32 {
+    switch style.profile {
+        // Smooth: rounded falloff, like the silhouette of a tube.
+        case 1u: {
+            return sqrt(max(0.0, 1.0 - u * u));
+        }
+        // Triangle: linear falloff, peaking in the middle.
+        case 2u: {
+            return max(0.0, 1.0 - abs(u));
+        }
+        // Flat (and default): constant, hard-edged ribbon.
+        default: {
+            return 1.0;
+        }
+    }
 }
 
 @fragment
 fn fragment(in: VertexOut) -> @location(0) vec4<f32> {
-    return in.color;
+    var color = in.color;
+    color.a *= profile_alpha(in.side);
+    return color;
 }

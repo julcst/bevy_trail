@@ -1478,6 +1478,7 @@ name = "bevy_trail"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "rand",
 ]
 
 [[package]]

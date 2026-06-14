@@ -14,13 +14,38 @@ use bevy::{
 };
 
 /// Cross-section shape of the trail ribbon.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// The profile modulates the ribbon's alpha across its width, so it is most
+/// visible with an alpha-aware [`TrailRenderMode`] (additive or transparent):
+/// - [`Flat`](Self::Flat) keeps a constant, hard-edged ribbon.
+/// - [`Smooth`](Self::Smooth) fades the edges with a rounded falloff, giving a
+///   soft, tube-like look.
+/// - [`Triangle`](Self::Triangle) fades linearly to the edges, peaking in the
+///   middle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum TrailProfile {
     #[default]
     Flat = 0,
     Smooth = 1,
     Triangle = 2,
+}
+
+/// How a trail's pixels are blended into the frame.
+///
+/// This is a [`Component`]; [`Trail`] inserts a default one via `#[require]`.
+/// Mutate it at runtime to switch how the trail composites with the scene.
+#[derive(Component, ExtractComponent, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TrailRenderMode {
+    /// Opaque: alpha is ignored and the trail overwrites whatever is behind it.
+    #[default]
+    Normal,
+    /// Additive: the trail's color is added to the frame, scaled by its alpha.
+    /// Great for glowing, energetic effects; order-independent.
+    Additive,
+    /// Straight alpha blending: the trail's alpha controls how much it lets the
+    /// background show through.
+    Transparent,
 }
 
 /// Appearance of a trail.
@@ -34,7 +59,10 @@ pub struct TrailStyle {
     pub end_color: LinearRgba,
     pub start_width: f32,
     pub end_width: f32,
-    pub profile: u32, // TODO: Use TrailProfile once the shader reads it.
+    /// Cross-section shape, stored as the `u32` repr of a [`TrailProfile`] so it
+    /// can travel into the shader uniform. Use [`with_profile`](Self::with_profile)
+    /// or assign `profile as u32` to set it.
+    pub profile: u32,
 }
 
 impl Default for TrailStyle {
@@ -44,8 +72,16 @@ impl Default for TrailStyle {
             end_color: LinearRgba::WHITE,
             start_width: 0.01,
             end_width: 0.0,
-            profile: 0,
+            profile: TrailProfile::Flat as u32,
         }
+    }
+}
+
+impl TrailStyle {
+    /// Sets the ribbon's cross-section [`TrailProfile`].
+    pub fn with_profile(mut self, profile: TrailProfile) -> Self {
+        self.profile = profile as u32;
+        self
     }
 }
 
@@ -85,7 +121,7 @@ pub struct TrailPoint {
 /// # }
 /// ```
 #[derive(Component, Clone, Debug)]
-#[require(Transform, TrailStyle)]
+#[require(Transform, Visibility, TrailStyle, TrailRenderMode)]
 pub struct Trail {
     /// Maximum number of points retained in the ring buffer.
     pub capacity: u32,

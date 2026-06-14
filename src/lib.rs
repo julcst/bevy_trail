@@ -45,7 +45,7 @@ use crate::{
 pub mod prelude {
     pub use crate::{
         emitter::TrailEmitter,
-        types::{Trail, TrailPoint, TrailProfile, TrailStyle},
+        types::{Trail, TrailPoint, TrailProfile, TrailRenderMode, TrailStyle},
         TrailPlugin,
     };
 }

@@ -1,3 +1,3 @@
 # bevy_trail
 
-Hardware-accelerated GPU trail rendering for Bevy.
+Hardware-accelerated GPU trail rendering plugin for Bevy.

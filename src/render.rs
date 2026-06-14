@@ -7,7 +7,7 @@
 //! into Bevy—render nodes are another, lower-level method—but it does allow
 //! for better reuse of parts of Bevy's built-in mesh rendering logic.
 
-use crate::types::TrailData;
+use crate::types::{TrailData, TrailRenderMode};
 use bevy::{
     core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
     ecs::{
@@ -29,10 +29,11 @@ use bevy::{
         },
         render_resource::{
             binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupEntries,
-            BindGroupLayoutDescriptor, BindGroupLayoutEntries, Canonical, ColorTargetState,
-            ColorWrites, CompareFunction, DepthStencilState, FragmentState, PipelineCache,
-            PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderStages, Specializer,
-            SpecializerKey, TextureFormat, Variants, VertexState,
+            BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent, BlendFactor,
+            BlendOperation, BlendState, Canonical, ColorTargetState, ColorWrites, CompareFunction,
+            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
+            RenderPipelineDescriptor, ShaderStages, Specializer, SpecializerKey, TextureFormat,
+            Variants, VertexState,
         },
         renderer::RenderDevice,
         view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
@@ -174,7 +175,10 @@ pub struct TrailRenderPlugin;
 impl Plugin for TrailRenderPlugin {
     fn build(&self, app: &mut App) {
         // Main World
-        app.add_plugins(ExtractComponentPlugin::<TrailData>::default());
+        app.add_plugins((
+            ExtractComponentPlugin::<TrailData>::default(),
+            ExtractComponentPlugin::<TrailRenderMode>::default(),
+        ));
 
         // Render World
         let render_app = app.sub_app_mut(RenderApp);
@@ -206,6 +210,7 @@ fn queue_custom_phase_item(
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
     views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
+    trail_modes: Query<&TrailRenderMode>,
     mut next_tick: Local<Tick>,
 ) {
     let draw_custom_phase_item = opaque_draw_functions.read().id::<DrawTrailCommands>();
@@ -224,10 +229,12 @@ fn queue_custom_phase_item(
             // Ordinarily, the [`SpecializedRenderPipeline::Key`] would contain
             // some per-view settings, such as whether the view is HDR, but for
             // simplicity's sake we simply hard-code the view's characteristics,
-            // with the exception of number of MSAA samples.
+            // with the exception of number of MSAA samples and the trail's own
+            // blend mode.
+            let mode = trail_modes.get(entity.0).copied().unwrap_or_default();
             let Ok(pipeline_id) = pipeline
                 .variants
-                .specialize(&pipeline_cache, TrailPipelineKey { msaa: *msaa })
+                .specialize(&pipeline_cache, TrailPipelineKey { msaa: *msaa, mode })
             else {
                 continue;
             };
@@ -337,6 +344,7 @@ impl FromWorld for TrailPipeline {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, SpecializerKey)]
 struct TrailPipelineKey {
     msaa: Msaa,
+    mode: TrailRenderMode,
 }
 
 struct TrailPipelineSpecializer;
@@ -350,6 +358,33 @@ impl Specializer<RenderPipeline> for TrailPipelineSpecializer {
         descriptor: &mut RenderPipelineDescriptor,
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.multisample.count = key.msaa.samples();
+
+        // Pick the blend state for this trail's render mode. The fragment shader
+        // outputs straight (non-premultiplied) color, so additive scales the
+        // contribution by alpha and transparent uses standard alpha blending.
+        let blend = match key.mode {
+            TrailRenderMode::Normal => None,
+            TrailRenderMode::Additive => Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+                alpha: BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+            }),
+            TrailRenderMode::Transparent => Some(BlendState::ALPHA_BLENDING),
+        };
+
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            for target in fragment.targets.iter_mut().flatten() {
+                target.blend = blend;
+            }
+        }
+
         Ok(key)
     }
 }
