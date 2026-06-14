@@ -22,13 +22,17 @@ use bevy::{
     prelude::*,
     render::{
         extract_component::ExtractComponentPlugin,
+        render_asset::RenderAssets,
+        renderer::RenderQueue,
+        storage::GpuShaderStorageBuffer,
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
             RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupEntries,
+            binding_types::uniform_buffer, encase::StorageBuffer as EncaseStorageBuffer,
+            AsBindGroup, BindGroup, BindGroupEntries,
             BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent, BlendFactor,
             BlendOperation, BlendState, Canonical, ColorTargetState, ColorWrites, CompareFunction,
             DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
@@ -136,6 +140,33 @@ fn prepare_trail_view_bind_group(
     ));
 }
 
+/// Writes each trail's ring into its persistent GPU storage buffer in place
+/// (`write_buffer`), instead of letting the storage asset reallocate a fresh
+/// buffer on every change. The buffer is created once (with `COPY_DST`) in
+/// `init_trails`; here we just re-encode the points into a reused scratch buffer
+/// and queue a copy. Eliminating the per-frame GPU reallocation is what removes
+/// the multi-trail stutter.
+fn update_trail_storage(
+    render_queue: Res<RenderQueue>,
+    gpu_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    query: Query<&TrailData>,
+    mut scratch: Local<Vec<u8>>,
+) {
+    for trail in query.iter() {
+        let Some(gpu) = gpu_buffers.get(&trail.data) else {
+            continue;
+        };
+
+        scratch.clear();
+        {
+            let mut wrapper = EncaseStorageBuffer::new(&mut *scratch);
+            wrapper.write(&trail.cpu_data).unwrap();
+        }
+
+        render_queue.write_buffer(&gpu.buffer, 0, &scratch);
+    }
+}
+
 // TODO: only rebuild bind groups when the data changes
 fn prepare_trail_bind_groups(
     mut commands: Commands,
@@ -188,6 +219,7 @@ impl Plugin for TrailRenderPlugin {
             .add_systems(
                 Render,
                 (
+                    update_trail_storage.in_set(RenderSystems::PrepareResources),
                     (prepare_trail_bind_groups, prepare_trail_view_bind_group)
                         .in_set(RenderSystems::PrepareBindGroups),
                     queue_custom_phase_item.in_set(RenderSystems::Queue),

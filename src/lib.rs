@@ -33,7 +33,10 @@ pub mod render;
 pub mod types;
 
 use bevy::{
-    camera::primitives::Aabb, math::Vec3A, prelude::*, render::storage::ShaderStorageBuffer,
+    camera::primitives::Aabb,
+    math::Vec3A,
+    prelude::*,
+    render::{render_resource::BufferUsages, storage::ShaderStorageBuffer},
 };
 
 use crate::{
@@ -77,8 +80,7 @@ impl Plugin for TrailPlugin {
                 (
                     init_trails.in_set(TrailSystems::Init),
                     emit_points_system.in_set(TrailSystems::Emit),
-                    (sync_trail_style, sync_trail_buffers, update_trail_aabb)
-                        .in_set(TrailSystems::Sync),
+                    (sync_trail_style, update_trail_aabb).in_set(TrailSystems::Sync),
                 ),
             );
     }
@@ -94,7 +96,15 @@ fn init_trails(
     for (entity, trail, style) in &query {
         let capacity = trail.capacity.max(1);
         let cpu_data = vec![TrailPoint::default(); capacity as usize];
-        let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
+
+        // Allocate the GPU buffer once. `COPY_DST` lets the render world
+        // overwrite its contents in place every frame via
+        // `RenderQueue::write_buffer` (see `update_trail_storage`), instead of
+        // reallocating a fresh buffer through `set_data` — the reallocation was
+        // the cause of the multi-trail stutter.
+        let mut storage = ShaderStorageBuffer::from(cpu_data.clone());
+        storage.buffer_description.usage |= BufferUsages::COPY_DST;
+        let data = buffers.add(storage);
 
         commands.entity(entity).insert(TrailData {
             header: TrailHeader {
@@ -115,21 +125,6 @@ fn init_trails(
 fn sync_trail_style(mut query: Query<(&TrailStyle, &mut TrailData), Changed<TrailStyle>>) {
     for (style, mut data) in &mut query {
         data.style = style.clone();
-    }
-}
-
-/// Uploads CPU ring data to the GPU storage buffer whenever it changes.
-fn sync_trail_buffers(
-    trails: Query<&TrailData, Changed<TrailData>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
-    for trail in &trails {
-        if let Some(buffer) = buffers.get_mut(&trail.data) {
-            // `set_data` re-encodes into a fresh byte buffer internally, so it
-            // only needs to borrow our points — cloning the whole ring first was
-            // a wasted per-frame, per-trail allocation.
-            buffer.set_data(&trail.cpu_data);
-        }
     }
 }
 

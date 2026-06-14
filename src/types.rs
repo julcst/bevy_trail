@@ -216,13 +216,15 @@ pub struct TrailData {
     pub style: TrailStyle,
 }
 
-/// Extract only the render-relevant slice of [`TrailData`] into the render
-/// world. The CPU ring buffer (`cpu_data`) lives only in the main world — the
-/// renderer binds the *GPU* storage buffer via the `data` handle — so copying
-/// the whole `Vec<TrailPoint>` across the world boundary every frame is pure
-/// waste. Leaving it empty here turns a per-trail, per-frame heap clone of the
-/// entire ring buffer into three cheap field copies (two small uniforms and an
-/// `Arc`-backed handle).
+/// Extract [`TrailData`] into the render world.
+///
+/// The ring points (`cpu_data`) are carried across so the render world can write
+/// them into each trail's *persistent* GPU storage buffer in place every frame
+/// (see `update_trail_storage`), rather than having the storage asset reallocate
+/// a fresh GPU buffer on every change. A controlled A/B benchmark showed this
+/// path is faster across all trail counts and, crucially, removes the
+/// reallocation stalls that caused the multi-trail stutter (occasional 30ms+
+/// p99 / 300ms frame spikes).
 impl ExtractComponent for TrailData {
     type QueryData = &'static TrailData;
     type QueryFilter = ();
@@ -234,7 +236,7 @@ impl ExtractComponent for TrailData {
         Some(TrailData {
             header: item.header.clone(),
             data: item.data.clone(),
-            cpu_data: Vec::new(),
+            cpu_data: item.cpu_data.clone(),
             style: item.style.clone(),
         })
     }
