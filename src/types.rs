@@ -203,7 +203,7 @@ impl Default for TrailHeader {
 /// The frustum-culling components ([`Visibility`], [`Aabb`], [`VisibilityClass`])
 /// live here, on the component that is actually rendered, so culling works
 /// without any setup from the user.
-#[derive(AsBindGroup, Clone, Component, ExtractComponent, Default)]
+#[derive(AsBindGroup, Clone, Component, Default)]
 #[require(Transform, Visibility, Aabb, VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<TrailData>)]
 pub struct TrailData {
@@ -214,4 +214,28 @@ pub struct TrailData {
     pub cpu_data: Vec<TrailPoint>,
     #[uniform(2)]
     pub style: TrailStyle,
+}
+
+/// Extract only the render-relevant slice of [`TrailData`] into the render
+/// world. The CPU ring buffer (`cpu_data`) lives only in the main world — the
+/// renderer binds the *GPU* storage buffer via the `data` handle — so copying
+/// the whole `Vec<TrailPoint>` across the world boundary every frame is pure
+/// waste. Leaving it empty here turns a per-trail, per-frame heap clone of the
+/// entire ring buffer into three cheap field copies (two small uniforms and an
+/// `Arc`-backed handle).
+impl ExtractComponent for TrailData {
+    type QueryData = &'static TrailData;
+    type QueryFilter = ();
+    type Out = TrailData;
+
+    fn extract_component(
+        item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some(TrailData {
+            header: item.header.clone(),
+            data: item.data.clone(),
+            cpu_data: Vec::new(),
+            style: item.style.clone(),
+        })
+    }
 }

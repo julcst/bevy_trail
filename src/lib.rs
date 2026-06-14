@@ -125,7 +125,10 @@ fn sync_trail_buffers(
 ) {
     for trail in &trails {
         if let Some(buffer) = buffers.get_mut(&trail.data) {
-            buffer.set_data(trail.cpu_data.clone());
+            // `set_data` re-encodes into a fresh byte buffer internally, so it
+            // only needs to borrow our points — cloning the whole ring first was
+            // a wasted per-frame, per-trail allocation.
+            buffer.set_data(&trail.cpu_data);
         }
     }
 }
