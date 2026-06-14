@@ -5,38 +5,45 @@
 //! of radius `arm1.radius + arm2.radius`. With random parameters per trail the
 //! whole field fills a sphere with desynchronized, colorful paths.
 //!
-//! On-screen buttons switch the [`TrailRenderMode`] (normal / additive /
-//! transparent) and the [`TrailProfile`] (flat / smooth / triangle) for every
-//! trail at once, so you can see how blending and cross-section shape interact.
+//! A Bevy Feathers panel of radio buttons switches the [`TrailRenderMode`]
+//! (normal / additive / transparent) and the [`TrailProfile`] (flat / smooth /
+//! triangle) for every trail at once, so you can see how blending and
+//! cross-section shape interact.
 
+use core::mem;
 use std::f32::consts::TAU;
 
-use bevy::prelude::*;
+use bevy::{
+    feathers::{
+        controls::radio,
+        dark_theme::create_dark_theme,
+        theme::{ThemeBackgroundColor, ThemedText, UiTheme},
+        tokens, FeathersPlugins,
+    },
+    input_focus::tab_navigation::TabGroup,
+    prelude::*,
+    ui::Checked,
+    ui_widgets::{observe, RadioGroup, ValueChange},
+};
 use bevy_trail::prelude::*;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 const TRAIL_COUNT: usize = 42;
 const TRAIL_CAPACITY: u32 = 512;
 const CAMERA_RADIUS: f32 = 6.0;
 
-const NORMAL_BUTTON: Color = Color::srgb(0.15, 0.15, 0.17);
-const HOVERED_BUTTON: Color = Color::srgb(0.25, 0.25, 0.28);
-const SELECTED_BUTTON: Color = Color::srgb(0.2, 0.5, 0.9);
+// Additive + smooth shows off both alpha blending and the rounded cross-section
+// out of the box; the matching radio buttons start checked.
+const INITIAL_MODE: TrailRenderMode = TrailRenderMode::Additive;
+const INITIAL_PROFILE: TrailProfile = TrailProfile::Smooth;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, TrailPlugin))
+        .add_plugins((DefaultPlugins, FeathersPlugins, TrailPlugin))
+        .insert_resource(UiTheme(create_dark_theme()))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.04)))
-        .init_resource::<Controls>()
         .add_systems(Startup, (setup, setup_ui))
-        .add_systems(
-            Update,
-            (
-                move_trails,
-                spin_camera,
-                (handle_buttons, apply_controls, highlight_buttons).chain(),
-            ),
-        )
+        .add_systems(Update, (move_trails, spin_camera))
         .run();
 }
 
@@ -51,7 +58,7 @@ struct Arm {
 impl Arm {
     fn random(rng: &mut impl Rng) -> Self {
         Self {
-            axis: random_unit_vector(rng),
+            axis: Sphere::new(1.0).sample_boundary(rng),
             radius: rng.random_range(0.3f32..1.0).powf(1.0 / 3.0),
             speed: rng.random_range(0.5..2.5),
             phase: rng.random_range(0.0..TAU),
@@ -71,24 +78,9 @@ struct DoublePendulum {
 }
 
 impl DoublePendulum {
-    fn random(rng: &mut impl Rng) -> Self {
-        Self {
-            arm1: Arm::random(rng),
-            arm2: Arm::random(rng),
-        }
-    }
-
     fn position(&self, t: f32) -> Vec3 {
         self.arm1.offset(t) + self.arm2.offset(t)
     }
-}
-
-/// A uniformly distributed point on the unit sphere.
-fn random_unit_vector(rng: &mut impl Rng) -> Vec3 {
-    let z = rng.random_range(-1.0f32..1.0);
-    let angle = rng.random_range(0.0f32..TAU);
-    let r = (1.0 - z * z).sqrt();
-    Vec3::new(r * angle.cos(), r * angle.sin(), z)
 }
 
 fn setup(
@@ -101,7 +93,10 @@ fn setup(
     for i in 0..TRAIL_COUNT {
         let mut rng = StdRng::seed_from_u64(i as u64);
 
-        let pendulum = DoublePendulum::random(&mut rng);
+        let pendulum = DoublePendulum {
+            arm1: Arm::random(&mut rng),
+            arm2: Arm::random(&mut rng),
+        };
         let color = Oklcha::lch(
             rng.random_range(0.6..1.0),
             1.0,
@@ -118,8 +113,9 @@ fn setup(
                 end_color: color.with_alpha(0.0).into(),
                 start_width: 0.015,
                 end_width: 0.0,
-                ..default()
+                profile: INITIAL_PROFILE as u32,
             },
+            INITIAL_MODE,
             TrailEmitter::default(),
             pendulum,
             // A small unlit ball marks the head of the trail.
@@ -157,160 +153,100 @@ fn spin_camera(time: Res<Time>, mut cameras: Query<&mut Transform, With<Camera3d
 
 // --- UI -------------------------------------------------------------------
 
-/// The render mode and profile currently applied to every trail.
-#[derive(Resource)]
-struct Controls {
-    mode: TrailRenderMode,
-    profile: TrailProfile,
-}
-
-impl Default for Controls {
-    fn default() -> Self {
-        // Additive + smooth shows off both alpha blending and the rounded
-        // cross-section out of the box.
-        Self {
-            mode: TrailRenderMode::Additive,
-            profile: TrailProfile::Smooth,
-        }
-    }
-}
-
-/// Marks a button with the setting it selects when clicked.
+/// The trail setting a radio button selects when clicked.
 #[derive(Component, Clone, Copy)]
-enum Control {
+enum Setting {
     Mode(TrailRenderMode),
     Profile(TrailProfile),
 }
 
 fn setup_ui(mut commands: Commands) {
-    commands
-        .spawn(Node {
+    use Setting::{Mode, Profile};
+    use TrailProfile::*;
+    use TrailRenderMode::*;
+
+    commands.spawn((
+        Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(12.0),
-            left: Val::Px(12.0),
+            top: px(12),
+            left: px(12),
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(10.0),
+            row_gap: px(12),
+            padding: UiRect::all(px(12)),
             ..default()
-        })
-        .with_children(|root| {
-            spawn_row(
-                root,
-                "Render mode",
-                &[
-                    ("Normal", Control::Mode(TrailRenderMode::Normal)),
-                    ("Additive", Control::Mode(TrailRenderMode::Additive)),
-                    ("Transparent", Control::Mode(TrailRenderMode::Transparent)),
+        },
+        TabGroup::default(),
+        ThemeBackgroundColor(tokens::WINDOW_BG),
+        children![
+            (Text::new("Render mode"), ThemedText),
+            (
+                radio_group(),
+                children![
+                    setting_radio(Mode(Normal), "Normal"),
+                    (setting_radio(Mode(Additive), "Additive"), Checked),
+                    setting_radio(Mode(Transparent), "Transparent"),
                 ],
-            );
-            spawn_row(
-                root,
-                "Profile",
-                &[
-                    ("Flat", Control::Profile(TrailProfile::Flat)),
-                    ("Smooth", Control::Profile(TrailProfile::Smooth)),
-                    ("Triangle", Control::Profile(TrailProfile::Triangle)),
+            ),
+            (Text::new("Profile"), ThemedText),
+            (
+                radio_group(),
+                children![
+                    setting_radio(Profile(Flat), "Flat"),
+                    (setting_radio(Profile(Smooth), "Smooth"), Checked),
+                    setting_radio(Profile(Triangle), "Triangle"),
                 ],
-            );
-        });
+            ),
+        ],
+    ));
 }
 
-/// Spawns a labeled row of buttons, one per `(label, control)` pair.
-fn spawn_row(parent: &mut ChildSpawnerCommands, title: &str, buttons: &[(&str, Control)]) {
-    parent
-        .spawn(Node {
+/// A vertically-stacked radio group that applies its selection on change.
+fn radio_group() -> impl Bundle {
+    (
+        Node {
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(4.0),
+            row_gap: px(4),
             ..default()
-        })
-        .with_children(|row| {
-            row.spawn((
-                Text::new(title),
-                TextFont {
-                    font_size: 13.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.7, 0.7, 0.75)),
-            ));
-            row.spawn(Node {
-                column_gap: Val::Px(6.0),
-                ..default()
-            })
-            .with_children(|buttons_row| {
-                for (label, control) in buttons {
-                    buttons_row
-                        .spawn((
-                            Button,
-                            Node {
-                                padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
-                                ..default()
-                            },
-                            BackgroundColor(NORMAL_BUTTON),
-                            *control,
-                        ))
-                        .with_children(|button| {
-                            button.spawn((
-                                Text::new(*label),
-                                TextFont {
-                                    font_size: 14.0,
-                                    ..default()
-                                },
-                                TextColor(Color::WHITE),
-                            ));
-                        });
-                }
-            });
-        });
+        },
+        RadioGroup,
+        observe(on_select),
+    )
 }
 
-/// Records the chosen render mode / profile when a button is pressed.
-fn handle_buttons(
-    interactions: Query<(&Interaction, &Control), (Changed<Interaction>, With<Button>)>,
-    mut controls: ResMut<Controls>,
-) {
-    for (interaction, control) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        match control {
-            Control::Mode(mode) => controls.mode = *mode,
-            Control::Profile(profile) => controls.profile = *profile,
-        }
-    }
+/// A radio button tagged with the [`Setting`] it selects. Wrap it in a tuple
+/// with [`Checked`] to start it selected.
+fn setting_radio(setting: Setting, label: &'static str) -> impl Bundle {
+    radio(setting, Spawn((Text::new(label), ThemedText)))
 }
 
-/// Pushes the current selection onto every trail when it changes.
-fn apply_controls(
-    controls: Res<Controls>,
+/// Applies the picked [`Setting`] to every trail and moves the check mark to the
+/// chosen radio within its group.
+fn on_select(
+    change: On<ValueChange<Entity>>,
+    radios: Query<(Entity, &Setting)>,
+    mut commands: Commands,
     mut modes: Query<&mut TrailRenderMode>,
     mut styles: Query<&mut TrailStyle>,
 ) {
-    if !controls.is_changed() {
+    let Ok((_, &selected)) = radios.get(change.value) else {
         return;
-    }
-    for mut mode in &mut modes {
-        *mode = controls.mode;
-    }
-    for mut style in &mut styles {
-        style.profile = controls.profile as u32;
-    }
-}
+    };
 
-/// Tints each button: highlighted when selected, lit when hovered.
-fn highlight_buttons(
-    controls: Res<Controls>,
-    mut buttons: Query<(&Control, &Interaction, &mut BackgroundColor)>,
-) {
-    for (control, interaction, mut background) in &mut buttons {
-        let selected = match control {
-            Control::Mode(mode) => *mode == controls.mode,
-            Control::Profile(profile) => *profile == controls.profile,
-        };
-        background.0 = if selected {
-            SELECTED_BUTTON
-        } else if *interaction == Interaction::Hovered {
-            HOVERED_BUTTON
-        } else {
-            NORMAL_BUTTON
-        };
+    match selected {
+        Setting::Mode(mode) => modes.iter_mut().for_each(|mut m| *m = mode),
+        Setting::Profile(profile) => styles
+            .iter_mut()
+            .for_each(|mut s| s.profile = profile as u32),
+    }
+
+    for (entity, setting) in &radios {
+        if mem::discriminant(setting) == mem::discriminant(&selected) {
+            let mut radio = commands.entity(entity);
+            if entity == change.value {
+                radio.insert(Checked);
+            } else {
+                radio.remove::<Checked>();
+            }
+        }
     }
 }

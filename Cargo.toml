@@ -10,5 +10,8 @@ repository = "https://github.com/julianstamm/bevy_trail"
 bevy = { version = "0.18.1" }
 
 [dev-dependencies]
-bevy = { version = "0.18.1", features = ["debug"] }
-rand = "0.9"
+bevy = { version = "0.18.1", features = [
+    "debug",
+    "experimental_bevy_feathers",
+] }
+rand = "0.9.2"
