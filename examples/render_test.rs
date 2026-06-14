@@ -1,18 +1,22 @@
+//! Low-level example: render a pre-baked, static trail.
+//!
+//! Most users should reach for [`Trail`] + [`TrailEmitter`] (see
+//! `emitter_test`). This example instead inserts the internal [`TrailData`]
+//! directly to show the escape hatch for feeding custom, pre-computed geometry.
+//! Visibility and frustum culling are still handled for you — no `Aabb` or
+//! `NoFrustumCulling` needed.
+
 use std::f32::consts::TAU;
 
-use bevy::{
-    camera::{primitives::Aabb, visibility::NoFrustumCulling},
-    prelude::*,
-    render::storage::ShaderStorageBuffer,
-};
+use bevy::{prelude::*, render::storage::ShaderStorageBuffer};
 use bevy_trail::{
-    render::TrailRenderPlugin,
     types::{TrailData, TrailHeader, TrailPoint, TrailStyle},
+    TrailPlugin,
 };
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins((DefaultPlugins, TrailRenderPlugin))
+    app.add_plugins((DefaultPlugins, TrailPlugin))
         .add_systems(Startup, setup);
     app.run();
 }
@@ -35,37 +39,27 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
 
     let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
 
-    // Spawn a single entity that has custom rendering. It'll be extracted into
-    // the render world via [`ExtractComponent`].
-    commands.spawn((
-        // Note: Aabb would be better
-        // Aabb {
-        //     center: Vec3A::ZERO,
-        //     half_extents: Vec3A::splat(0.5),
-        // },
-        Visibility::Visible,
-        NoFrustumCulling,
-        Transform::default(),
-        TrailData {
-            header: TrailHeader {
-                head: n - 1,
-                length: n,
-                capacity: n,
-                max_length: 1.0,
-                max_time: 1.0,
-                current_length: 1.0,
-                current_time: 1.0,
-            },
-            data,
-            cpu_data,
-            style: TrailStyle {
-                start_color: LinearRgba::WHITE,
-                end_color: LinearRgba::RED,
-                start_width: 0.05,
-                ..default()
-            },
+    // A bare `TrailData` is enough; `Transform`, `Visibility`, `Aabb` and the
+    // visibility class are pulled in automatically.
+    commands.spawn(TrailData {
+        header: TrailHeader {
+            head: n - 1,
+            length: n,
+            capacity: n,
+            max_length: 1.0,
+            max_time: 1.0,
+            current_length: 1.0,
+            current_time: 1.0,
         },
-    ));
+        data,
+        cpu_data,
+        style: TrailStyle {
+            start_color: LinearRgba::WHITE,
+            end_color: LinearRgba::RED,
+            start_width: 0.05,
+            ..default()
+        },
+    });
 
     // Spawn the camera.
     commands.spawn((

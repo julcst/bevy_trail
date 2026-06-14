@@ -7,16 +7,8 @@
 
 use std::f32::consts::TAU;
 
-use bevy::{
-    camera::{primitives::Aabb, visibility::NoFrustumCulling},
-    prelude::*,
-    render::storage::ShaderStorageBuffer,
-};
-use bevy_trail::{
-    emitter::{TrailEmitter, TrailEmitterPlugin},
-    render::TrailRenderPlugin,
-    types::{TrailData, TrailHeader, TrailPoint, TrailStyle},
-};
+use bevy::prelude::*;
+use bevy_trail::prelude::*;
 
 const TRAIL_COUNT: usize = 48;
 const TRAIL_CAPACITY: u32 = 512;
@@ -24,7 +16,7 @@ const CAMERA_RADIUS: f32 = 6.0;
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, TrailRenderPlugin, TrailEmitterPlugin))
+        .add_plugins((DefaultPlugins, TrailPlugin))
         .add_systems(Startup, setup)
         .add_systems(Update, (move_trails, spin_camera))
         .run();
@@ -71,15 +63,10 @@ impl DoublePendulum {
     fn position(&self, t: f32) -> Vec3 {
         self.arm1.offset(t) + self.arm2.offset(t)
     }
-
-    fn radius(&self) -> f32 {
-        self.arm1.radius + self.arm2.radius
-    }
 }
 
 fn setup(
     mut commands: Commands,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -91,35 +78,19 @@ fn setup(
         let pendulum = DoublePendulum::random(&mut rng);
         let color = Oklcha::lch(rng.range(0.6, 1.0), 1.0, rng.range(0.0, 360.0));
 
-        let cpu_data = vec![TrailPoint::default(); TRAIL_CAPACITY as usize];
-        let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
-
         commands.spawn((
-            Visibility::Visible,
-            NoFrustumCulling,
             Transform::from_translation(pendulum.position(0.0)),
-            Aabb {
-                center: Vec3A::ZERO,
-                half_extents: Vec3A::splat(pendulum.radius()),
+            Trail::new(TRAIL_CAPACITY)
+                .with_max_length(6.0)
+                .with_max_time(6.0),
+            TrailStyle {
+                start_color: color.into(),
+                end_color: color.with_chroma(0.0).into(),
+                start_width: 0.015,
+                end_width: 0.0,
+                ..default()
             },
             TrailEmitter::default(),
-            TrailData {
-                header: TrailHeader {
-                    capacity: TRAIL_CAPACITY,
-                    max_length: 6.0,
-                    max_time: 6.0,
-                    ..default()
-                },
-                data,
-                cpu_data,
-                style: TrailStyle {
-                    start_color: color.into(),
-                    end_color: color.with_chroma(0.0).into(),
-                    start_width: 0.015,
-                    end_width: 0.0,
-                    ..default()
-                },
-            },
             pendulum,
             // A small unlit ball marks the head of the trail.
             children![(

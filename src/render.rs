@@ -174,8 +174,7 @@ pub struct TrailRenderPlugin;
 impl Plugin for TrailRenderPlugin {
     fn build(&self, app: &mut App) {
         // Main World
-        app.init_asset::<TrailData>()
-            .add_plugins((ExtractComponentPlugin::<TrailData>::default(),));
+        app.add_plugins(ExtractComponentPlugin::<TrailData>::default());
 
         // Render World
         let render_app = app.sub_app_mut(RenderApp);

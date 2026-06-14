@@ -1,28 +1,32 @@
+//! Automatic emission: trails that follow their entity's [`GlobalTransform`].
+
 use bevy::prelude::*;
-use bevy::render::storage::ShaderStorageBuffer;
 
-use crate::types::{TrailData, TrailPoint};
+use crate::types::{Trail, TrailData, TrailPoint};
 
-pub struct TrailEmitterPlugin;
-
-impl Plugin for TrailEmitterPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (emit_points_system, sync_trail_buffers_system).chain(),
-        );
-    }
-}
-
+/// Makes a trail trace the path of its entity automatically.
+///
+/// Add it to any entity with a [`Transform`]; it pulls in [`Trail`] (and thus
+/// the whole trail setup) via `#[require]`, so this is the only component you
+/// need for the common case:
+///
+/// ```no_run
+/// # use bevy::prelude::*;
+/// # use bevy_trail::prelude::*;
+/// # fn setup(mut commands: Commands) {
+/// commands.spawn((Transform::default(), TrailEmitter::default()));
+/// # }
+/// ```
 #[derive(Component, Default)]
-#[require(TrailData)]
+#[require(Trail)]
 pub struct TrailEmitter {
     pub last: Option<TrailPoint>,
-    /// If false, the emitter will update the head point every frame even if it doesn't move enough to emit a new point.
+    /// If false, the emitter updates the head point every frame even when it
+    /// hasn't moved far enough to emit a new point.
     pub lazy: bool,
 }
 
-fn emit_points_system(
+pub(crate) fn emit_points_system(
     time: Res<Time>,
     mut trails: Query<(&GlobalTransform, &mut TrailData, &mut TrailEmitter)>,
 ) {
@@ -82,16 +86,4 @@ fn emit_points_system(
                 trail.header.length -= 1;
             }
         });
-}
-
-fn sync_trail_buffers_system(
-    trails: Query<&TrailData>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
-) {
-    trails.iter().for_each(|trail| {
-        buffers
-            .get_mut(&trail.data)
-            .unwrap()
-            .set_data(trail.cpu_data.clone());
-    });
 }
