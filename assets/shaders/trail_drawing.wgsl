@@ -1,4 +1,4 @@
-// #import bevy_pbr::mesh_view_bindings::view
+#import bevy_render::view::View
 
 struct Header {
     head: u32,
@@ -25,9 +25,11 @@ struct TrailStyle {
     profile: u32, 
 };
 
-@group(0) @binding(0) var<uniform> header: Header;
-@group(0) @binding(1) var<storage, read> data: array<TrailPoint>;
-@group(0) @binding(2) var<uniform> style: TrailStyle;
+@group(0) @binding(0) var<uniform> view: View;
+
+@group(1) @binding(0) var<uniform> header: Header;
+@group(1) @binding(1) var<storage, read> data: array<TrailPoint>;
+@group(1) @binding(2) var<uniform> style: TrailStyle;
 
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -68,9 +70,16 @@ fn vertex(@builtin(vertex_index) vidx: u32) -> VertexOut {
     let t = clamp(time * length, 0.0, 1.0);
     let color = mix(style.start_color, style.end_color, t);
     let width = mix(style.start_width, style.end_width, t);
-    let right = cross(forward, vec3f(0.0, 0.0, 1.0)) * select(-width, width, side);
+
+    // Build a camera-facing ribbon: offset each point perpendicular to both the
+    // trail tangent and the direction from the camera to the point, so the
+    // ribbon always faces the camera regardless of view angle.
+    let view_dir = normalize(curr.position - view.world_position);
+    let right = normalize(cross(forward, view_dir)) * select(-width, width, side);
+    let world_pos = curr.position + right;
+
     return VertexOut(
-        vec4f(curr.position + right, 1.0),
+        view.clip_from_world * vec4f(world_pos, 1.0),
         color
     );
 }

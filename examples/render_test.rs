@@ -44,6 +44,7 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         //     half_extents: Vec3A::splat(0.5),
         // },
         Visibility::Visible,
+        NoFrustumCulling,
         Transform::default(),
         TrailData {
             header: TrailHeader {

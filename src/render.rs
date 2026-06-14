@@ -13,7 +13,10 @@ use bevy::{
     ecs::{
         change_detection::Tick,
         query::ROQueryItem,
-        system::{lifetimeless::Read, StaticSystemParam, SystemParamItem},
+        system::{
+            lifetimeless::{Read, SRes},
+            StaticSystemParam, SystemParamItem,
+        },
     },
     mesh::PrimitiveTopology,
     prelude::*,
@@ -25,13 +28,14 @@ use bevy::{
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            AsBindGroup, BindGroup, Canonical, ColorTargetState, ColorWrites, CompareFunction,
-            DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
-            RenderPipelineDescriptor, Specializer, SpecializerKey, TextureFormat, Variants,
-            VertexState,
+            binding_types::uniform_buffer, AsBindGroup, BindGroup, BindGroupEntries,
+            BindGroupLayoutDescriptor, BindGroupLayoutEntries, Canonical, ColorTargetState,
+            ColorWrites, CompareFunction, DepthStencilState, FragmentState, PipelineCache,
+            PrimitiveState, RenderPipeline, RenderPipelineDescriptor, ShaderStages, Specializer,
+            SpecializerKey, TextureFormat, Variants, VertexState,
         },
         renderer::RenderDevice,
-        view::{ExtractedView, RenderVisibleEntities},
+        view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
         Render, RenderApp, RenderSystems,
     },
 };
@@ -61,7 +65,7 @@ where
             return RenderCommandResult::Failure("BindGroup missing");
         };
 
-        pass.set_bind_group(0, &bg.value, &[]);
+        pass.set_bind_group(1, &bg.value, &[]);
         pass.draw(0..bg.vertex_count, 0..1);
 
         RenderCommandResult::Success
@@ -72,6 +76,63 @@ where
 pub struct GpuTrail {
     pub value: BindGroup,
     pub vertex_count: u32,
+}
+
+/// Holds the bind group for the view uniform (camera matrices), rebuilt each
+/// frame. Bound at group 0 so the trail shader can project world-space points
+/// into clip space.
+#[derive(Resource, Default)]
+struct TrailViewBindGroup(Option<BindGroup>);
+
+/// A [`RenderCommand`] that binds the view uniform (camera matrices) at the
+/// given group index, using the per-view dynamic offset.
+struct SetTrailViewBindGroup<const I: usize>;
+
+impl<P, const I: usize> RenderCommand<P> for SetTrailViewBindGroup<I>
+where
+    P: PhaseItem,
+{
+    type Param = SRes<TrailViewBindGroup>;
+
+    type ViewQuery = Read<ViewUniformOffset>;
+
+    type ItemQuery = ();
+
+    fn render<'w>(
+        _item: &P,
+        view_offset: ROQueryItem<'w, '_, Self::ViewQuery>,
+        _entity: Option<()>,
+        param: SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let Some(bind_group) = param.into_inner().0.as_ref() else {
+            return RenderCommandResult::Failure("View bind group missing");
+        };
+
+        pass.set_bind_group(I, bind_group, &[view_offset.offset]);
+
+        RenderCommandResult::Success
+    }
+}
+
+/// Rebuilds the view bind group each frame from the current [`ViewUniforms`].
+fn prepare_trail_view_bind_group(
+    mut bind_group: ResMut<TrailViewBindGroup>,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    pipeline: Res<TrailPipeline>,
+    view_uniforms: Res<ViewUniforms>,
+) {
+    let Some(view_binding) = view_uniforms.uniforms.binding() else {
+        return;
+    };
+
+    let view_layout = pipeline_cache.get_bind_group_layout(&pipeline.view_layout);
+    bind_group.0 = Some(render_device.create_bind_group(
+        "trail_view_bind_group",
+        &view_layout,
+        &BindGroupEntries::single(view_binding),
+    ));
 }
 
 // TODO: only rebuild bind groups when the data changes
@@ -104,7 +165,7 @@ fn prepare_trail_bind_groups(
 /// the render phase.
 type DrawTrailCommands = (
     SetItemPipeline,
-    // SetMeshViewBindGroup<0>,
+    SetTrailViewBindGroup<0>,
     DrawTrail,
 );
 
@@ -120,10 +181,12 @@ impl Plugin for TrailRenderPlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .add_render_command::<Opaque3d, DrawTrailCommands>()
+            .init_resource::<TrailViewBindGroup>()
             .add_systems(
                 Render,
                 (
-                    prepare_trail_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    (prepare_trail_bind_groups, prepare_trail_view_bind_group)
+                        .in_set(RenderSystems::PrepareBindGroups),
                     queue_custom_phase_item.in_set(RenderSystems::Queue),
                 ),
             );
@@ -207,6 +270,8 @@ fn queue_custom_phase_item(
 struct TrailPipeline {
     /// the `variants` collection holds onto the shader handle through the base descriptor
     variants: Variants<RenderPipeline, TrailPipelineSpecializer>,
+    /// Layout for the view uniform bind group (group 0).
+    view_layout: BindGroupLayoutDescriptor,
 }
 
 impl FromWorld for TrailPipeline {
@@ -215,10 +280,17 @@ impl FromWorld for TrailPipeline {
         let shader = asset_server.load("shaders/trail_drawing.wgsl");
         let render_device = world.resource::<RenderDevice>();
         let material_layout = TrailData::bind_group_layout_descriptor(render_device);
+        let view_layout = BindGroupLayoutDescriptor::new(
+            "trail_view_layout",
+            &BindGroupLayoutEntries::single(
+                ShaderStages::VERTEX,
+                uniform_buffer::<ViewUniform>(true),
+            ),
+        );
 
         let base_descriptor = RenderPipelineDescriptor {
             label: Some("custom render pipeline".into()),
-            layout: vec![material_layout],
+            layout: vec![view_layout.clone(), material_layout],
             vertex: VertexState {
                 shader: shader.clone(),
                 // No buffers
@@ -256,7 +328,10 @@ impl FromWorld for TrailPipeline {
 
         let variants = Variants::new(TrailPipelineSpecializer, base_descriptor);
 
-        Self { variants }
+        Self {
+            variants,
+            view_layout,
+        }
     }
 }
 

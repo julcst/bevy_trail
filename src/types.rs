@@ -1,7 +1,7 @@
 //! Core data types for trail rendering.
 
 use bevy::{
-    camera::visibility::{self, VisibilityClass},
+    camera::visibility::{self, NoFrustumCulling, VisibilityClass},
     prelude::*,
     render::{
         extract_component::ExtractComponent,
@@ -82,6 +82,7 @@ impl Default for TrailHeader {
     }
 }
 
+// TODO: Use AABB
 #[derive(AsBindGroup, Clone, Asset, Debug, TypePath, Component, ExtractComponent, Default)]
 #[require(VisibilityClass)]
 #[component(on_add = visibility::add_visibility_class::<TrailData>)]
