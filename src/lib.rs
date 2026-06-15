@@ -1,20 +1,17 @@
-//! High-performance GPU trail renderer for Bevy.
+//! GPU-accelerated trail (ribbon) renderer for Bevy.
 //!
-//! This crate provides a reusable trail rendering system that:
-//! - Stores trail control points in fixed-capacity ring storage (`capacity`, `head`, `len`)
-//! - Packs every trail into shared GPU buffers drawn by a single instanced pass
-//! - Expands geometry in the vertex shader for camera-facing billboards
-//! - Exposes metadata for procedural shading
+//! Trail points live in a fixed-capacity ring buffer. Every trail is packed into
+//! shared GPU buffers and drawn in one instanced pass per blend mode, with
+//! billboard geometry expanded in the vertex shader.
 //!
 //! A trail is plain data, not a render object, so [`TrailEmitter`](emitter::TrailEmitter)
-//! can be added to any existing entity (even one with its own mesh) without
-//! interfering with how that entity renders.
+//! can be added to any entity — even one with its own mesh — without affecting
+//! how it renders.
 //!
-//! # Quick Start
+//! # Quick start
 //!
-//! Add [`TrailPlugin`], then spawn anything with a [`Transform`] and a
-//! [`TrailEmitter`](emitter::TrailEmitter) — the plugin samples its path and
-//! renders it as part of the global trail batch.
+//! Add [`TrailPlugin`] and spawn anything with a [`Transform`] and a
+//! [`TrailEmitter`](emitter::TrailEmitter):
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -61,8 +58,7 @@ pub enum TrailSystems {
     Emit,
 }
 
-/// Adds everything needed to spawn and render trails: emission, trail-state
-/// upkeep, and the batched render pipeline.
+/// Wires up trail emission, state upkeep, and the batched render pipeline.
 pub struct TrailPlugin;
 
 impl Plugin for TrailPlugin {
@@ -79,10 +75,8 @@ impl Plugin for TrailPlugin {
     }
 }
 
-/// Inserts the internal [`TrailData`] for any entity that has a [`Trail`] but
-/// isn't initialized yet. No GPU buffers are allocated here: the renderer packs
-/// every trail's points into shared batched buffers each frame (see
-/// [`crate::render`]).
+/// Inserts [`TrailData`] for any [`Trail`] that lacks it. No GPU allocation
+/// here — the renderer packs all trails into shared buffers each frame.
 fn init_trails(mut commands: Commands, query: Query<(Entity, &Trail), Without<TrailData>>) {
     for (entity, trail) in &query {
         commands

@@ -32,7 +32,7 @@ const TRAIL_COUNT: usize = 300;
 const TRAIL_CAPACITY: u32 = 512;
 const CAMERA_RADIUS: f32 = 6.0;
 
-// Additive + smooth shows off both alpha blending and the rounded cross-section
+// Transparent + smooth shows off alpha blending and the rounded cross-section
 // out of the box; the matching radio buttons start checked.
 const INITIAL_MODE: TrailRenderMode = TrailRenderMode::Transparent;
 const INITIAL_PROFILE: TrailProfile = TrailProfile::Smooth;

@@ -37,9 +37,8 @@ fn setup(mut commands: Commands) {
         })
         .collect::<Vec<_>>();
 
-    // `from_points` builds the ring header for us; pairing it with a `TrailStyle`
-    // is enough — the renderer batches the world-space points into the shared GPU
-    // buffers. `TrailRenderMode` is supplied via `#[require]`.
+    // `from_points` builds the header; a `TrailStyle` is enough to draw.
+    // `TrailRenderMode` comes in via `#[require]`.
     commands.spawn((
         TrailData::from_points(cpu_data, 1.0, 1.0),
         TrailStyle {

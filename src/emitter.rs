@@ -6,11 +6,10 @@ use bevy::prelude::*;
 
 use crate::types::{Trail, TrailData, TrailHeader, TrailPoint};
 
-/// Makes a trail trace the path of its entity automatically.
+/// Makes a trail trace its entity's path automatically.
 ///
-/// Add it to any entity with a [`Transform`]; it pulls in [`Trail`] (and thus
-/// the whole trail setup) via `#[require]`, so this is the only component you
-/// need for the common case:
+/// Add it to any entity with a [`Transform`]; it pulls in [`Trail`] via
+/// `#[require]`, so it's the only component you need for the common case:
 ///
 /// ```no_run
 /// # use bevy::prelude::*;
@@ -23,24 +22,20 @@ use crate::types::{Trail, TrailData, TrailHeader, TrailPoint};
 #[require(Trail)]
 pub struct TrailEmitter {
     pub last: Option<TrailPoint>,
-    /// If false, the emitter updates the head point every frame even when it
-    /// hasn't moved far enough to emit a new point.
+    /// If false, the head point is updated every frame even when the entity
+    /// hasn't moved far enough to emit a new one.
     pub lazy: bool,
-    /// Minimum world-space distance the entity must travel before a new point
-    /// is emitted. `None` derives a spacing that fills the ring buffer over one
+    /// Minimum travel distance before a new point is emitted. `None` derives a
+    /// spacing that fills the ring over one
     /// [`Trail::max_length`](crate::types::Trail) of travel.
     pub min_distance: Option<f32>,
 }
 
 impl TrailEmitter {
-    /// Resolves the minimum travel distance between emitted points: an explicit
-    /// [`min_distance`](Self::min_distance), else `max_length / capacity` so a
-    /// default trail keeps roughly `capacity` points across its visible length.
-    ///
-    /// Returns `None` when there is no length budget to derive from
-    /// (`max_length == 0`, length clipping disabled) and no explicit
-    /// `min_distance`; the emitter then emits on any movement (see
-    /// [`emit_points_system`]). Set `min_distance` to gate spacing in that case.
+    /// Minimum travel distance between points: explicit
+    /// [`min_distance`](Self::min_distance), else `max_length / capacity`.
+    /// `None` (no length budget and no explicit distance) means emit on any
+    /// movement — see [`emit_points_system`].
     fn spacing(&self, header: &TrailHeader) -> Option<f32> {
         self.min_distance.or_else(|| {
             let derived = header.max_length / header.capacity.max(1) as f32;
@@ -49,6 +44,8 @@ impl TrailEmitter {
     }
 }
 
+/// Samples each emitter's [`GlobalTransform`] into its ring (in parallel),
+/// gated by spacing, then clips the tail by `max_length`/`max_time`.
 pub(crate) fn emit_points_system(
     time: Res<Time>,
     mut trails: Query<(&GlobalTransform, &mut TrailData, &mut TrailEmitter)>,
@@ -83,28 +80,27 @@ pub(crate) fn emit_points_system(
             };
 
             if should_emit {
-                // Increment header
+                // Advance the head and write the new point. `make_mut` clones the
+                // ring only when it's still shared with the render world, and the
+                // clone keeps the `len == capacity` invariant (no resize).
                 let capacity = trail.header.capacity;
                 trail.header.head = (trail.header.head + 1) % capacity;
                 trail.header.length = (trail.header.length + 1).min(capacity);
 
-                // Write new head. `make_mut` only clones the ring when it is still
-                // shared with the render world (i.e. when this trail changed); the
-                // clone preserves the `len == capacity` invariant, so no resize.
                 let head = trail.header.head as usize;
                 Arc::make_mut(&mut trail.cpu_data)[head] = point.clone();
                 emitter.last = Some(point);
             } else if !emitter.lazy {
-                // Overwrite head
+                // Didn't emit, but keep the head pinned to the current position.
                 let head = trail.header.head as usize;
                 Arc::make_mut(&mut trail.cpu_data)[head] = point;
             }
 
             // Clip the tail. A 0 budget disables that axis; with both disabled
-            // the trail is bounded only by capacity, so skip clipping entirely.
+            // the trail is bounded only by capacity, so skip clipping.
             let clip = trail.header.max_length > 0.0 || trail.header.max_time > 0.0;
             while clip && trail.header.length > 1 {
-                // We take the point before the end (+1) for smoother tail clipping
+                // Test the point one in from the tail for smoother clipping.
                 let end = (trail.header.head + trail.header.capacity - trail.header.length + 1)
                     % trail.header.capacity;
                 let point = &trail.cpu_data[end as usize];

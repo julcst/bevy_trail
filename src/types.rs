@@ -7,57 +7,46 @@ use bevy::{
     render::{extract_component::ExtractComponent, render_resource::ShaderType},
 };
 
-/// Cross-section shape of the trail ribbon.
-///
-/// The profile modulates the ribbon's alpha across its width, so it is most
-/// visible with an alpha-aware [`TrailRenderMode`] (additive or transparent):
-/// - [`Flat`](Self::Flat) keeps a constant, hard-edged ribbon.
-/// - [`Smooth`](Self::Smooth) fades the edges with a rounded falloff, giving a
-///   soft, tube-like look.
-/// - [`Triangle`](Self::Triangle) fades linearly to the edges, peaking in the
-///   middle.
+/// Cross-section shape of the ribbon, modulating alpha across its width (most
+/// visible with an alpha-aware [`TrailRenderMode`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum TrailProfile {
+    /// Constant, hard-edged ribbon.
     #[default]
     Flat = 0,
+    /// Rounded edge falloff — soft, tube-like.
     Smooth = 1,
+    /// Linear falloff, peaking in the middle.
     Triangle = 2,
 }
 
-/// How a trail's pixels are blended into the frame.
-///
-/// This is a [`Component`]; [`Trail`] inserts a default one via `#[require]`.
-/// Mutate it at runtime to switch how the trail composites with the scene.
+/// How a trail's pixels blend into the frame. Inserted by [`Trail`] via
+/// `#[require]`; mutate at runtime to switch compositing.
 #[derive(Component, ExtractComponent, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TrailRenderMode {
-    /// Opaque: alpha is ignored and the trail overwrites whatever is behind it.
+    /// Overwrites the background; alpha ignored.
     #[default]
     Opaque,
-    /// Additive: the trail's color is added to the frame, scaled by its alpha.
-    /// Great for glowing, energetic effects; order-independent.
+    /// Adds color to the frame, scaled by alpha. Good for glow; order-independent.
     Additive,
-    /// Straight alpha blending: the trail's alpha controls how much it lets the
-    /// background show through.
+    /// Standard alpha blending.
     Transparent,
 }
 
-/// Appearance of a trail.
+/// Appearance of a trail: colors, widths, and cross-section profile.
 ///
-/// This is a [`Component`] in its own right, so it can be queried and mutated
-/// independently of the rest of the trail (e.g. to animate colors or width at
-/// runtime). [`Trail`] inserts a default one for you via `#[require]`. The
-/// renderer reads it straight off each trail entity (it is an [`ExtractComponent`]),
-/// so mutating it animates the trail with no extra bookkeeping.
+/// A [`Component`] in its own right, extracted straight off the entity, so
+/// mutating it animates the trail with no extra bookkeeping. [`Trail`] inserts a
+/// default via `#[require]`.
 #[derive(Component, ExtractComponent, Clone, Debug, ShaderType)]
 pub struct TrailStyle {
     pub start_color: LinearRgba,
     pub end_color: LinearRgba,
     pub start_width: f32,
     pub end_width: f32,
-    /// Cross-section shape, stored as the `u32` repr of a [`TrailProfile`] so it
-    /// can travel into the shader uniform. Use [`with_profile`](Self::with_profile)
-    /// or assign `profile as u32` to set it.
+    /// [`TrailProfile`] as its `u32` repr (to cross into the shader). Set via
+    /// [`with_profile`](Self::with_profile).
     pub profile: u32,
 }
 
@@ -85,21 +74,20 @@ impl TrailStyle {
 #[derive(Clone, Debug, ShaderType, Default)]
 pub struct TrailPoint {
     pub position: Vec3,
-    /// Time along trail
+    /// Seconds since the point was emitted.
     pub time: f32,
     pub custom: Vec3,
-    /// Distance along trail
+    /// Distance along the trail to this point.
     pub length: f32,
 }
 
-/// User-facing configuration for a trail.
+/// User-facing trail configuration.
 ///
-/// Add it to **any** entity that has a [`Transform`] — including one that already
-/// has its own [`Mesh3d`](bevy::prelude::Mesh3d), camera, or gameplay components.
-/// A trail is *not* a render object: its points are sampled in world space and
-/// drawn by a single global batched pass, so attaching one never interferes with
-/// the entity's own rendering. To have the trail follow the entity automatically,
-/// also add a [`TrailEmitter`](crate::emitter::TrailEmitter).
+/// Add it to **any** entity with a [`Transform`] — even one with its own
+/// [`Mesh3d`], camera, or gameplay components. Points are
+/// sampled in world space and drawn by a global batched pass, so a trail never
+/// interferes with the entity's own rendering. Add a
+/// [`TrailEmitter`](crate::emitter::TrailEmitter) to have it follow the entity.
 ///
 /// ```no_run
 /// # use bevy::prelude::*;
@@ -175,8 +163,8 @@ pub struct TrailHeader {
     pub current_length: f32,
     /// Set to 0 to disable length-based clipping
     pub max_length: f32,
-    /// Base index of this trail's points within the batched `points` storage
-    /// buffer. Set by the renderer while building the draw batch; `0` otherwise.
+    /// Base index of this trail's points in the batched `points` buffer. Set by
+    /// the renderer per frame; `0` otherwise.
     pub offset: u32,
 }
 
@@ -195,28 +183,21 @@ impl Default for TrailHeader {
     }
 }
 
-/// The renderable state of a trail: its world-space ring buffer and the header
-/// describing the live segment.
+/// Renderable trail state: the world-space ring buffer plus its [`TrailHeader`].
 ///
-/// This is a plain data component, **not** a render object — it carries no
-/// `Visibility`, `Aabb`, or visibility class. Every frame the renderer simply
-/// collects the [`TrailData`], [`TrailStyle`], and [`TrailRenderMode`] of all
-/// trails and packs them into shared GPU buffers for one batched instanced draw
-/// (see [`crate::render`]), so a trail adds no per-entity draw, bind group, or
-/// culling bookkeeping.
+/// Plain data, not a render object — no `Visibility`, `Aabb`, or visibility
+/// class. The renderer collects every trail's data each frame and packs it into
+/// shared buffers for one batched draw (see [`crate::render`]).
 ///
-/// The plugin inserts and maintains this automatically from [`Trail`]; you
-/// normally never construct it yourself. It is public only for advanced,
-/// low-level use (e.g. feeding a pre-baked, static trail via [`from_points`]),
-/// in which case [`TrailStyle`] and [`TrailRenderMode`] are supplied for you via
-/// `#[require]`.
+/// The plugin inserts and maintains this from [`Trail`]; you rarely build it
+/// yourself. Use [`new`] or [`from_points`] (e.g. for a pre-baked static trail),
+/// never the struct literal — they uphold the invariant below.
 ///
 /// # Invariant
 ///
 /// `cpu_data.len() == header.capacity` and `header.length <= header.capacity`.
-/// The constructors establish this and the emitter preserves it; the renderer
-/// relies on it. Build instances with [`new`] or [`from_points`] rather than the
-/// struct literal so you can't violate it by accident.
+/// The constructors establish it, the emitter preserves it, the renderer relies
+/// on it.
 ///
 /// [`new`]: Self::new
 /// [`from_points`]: Self::from_points
@@ -224,13 +205,9 @@ impl Default for TrailHeader {
 #[require(TrailStyle, TrailRenderMode)]
 pub struct TrailData {
     pub header: TrailHeader,
-    /// Live ring-buffer points, in **world space**. The renderer concatenates
-    /// these across all trails into one shared GPU buffer and draws them in a
-    /// single instanced draw call (see [`crate::render`]).
-    ///
-    /// Held behind an [`Arc`] so extracting the trail into the render world each
-    /// frame is a cheap pointer clone; the emitter mutates it via
-    /// [`Arc::make_mut`], which only deep-copies when a trail actually changes.
+    /// Live ring points in **world space**, behind an [`Arc`] so extraction is a
+    /// cheap pointer clone; the emitter mutates via [`Arc::make_mut`], copying
+    /// only when a trail actually changes.
     pub cpu_data: Arc<Vec<TrailPoint>>,
 }
 
@@ -274,10 +251,7 @@ impl TrailData {
     }
 }
 
-/// Extract [`TrailData`] into the render world: a cheap clone, since `cpu_data`
-/// is an [`Arc`]. The renderer packs every trail's points into one shared GPU
-/// buffer and draws them in a single instanced call (see [`crate::render`]),
-/// avoiding both per-frame buffer reallocation and one draw call per trail.
+/// Cheap clone (`cpu_data` is an [`Arc`]) into the render world.
 impl ExtractComponent for TrailData {
     type QueryData = &'static TrailData;
     type QueryFilter = ();

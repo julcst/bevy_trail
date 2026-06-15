@@ -46,27 +46,20 @@ const MODES: [TrailRenderMode; 3] = [
     TrailRenderMode::Transparent,
 ];
 
-/// A render-world draw anchor for one blend-mode batch. The renderer owns three
-/// of these (one per [`TrailRenderMode`]), each tagged with the mode it draws,
-/// and uses them as the representative entity for that batch's phase item.
+/// Per-blend-mode draw anchor; the renderer owns one per [`TrailRenderMode`] as
+/// the representative entity for that batch's phase item.
 ///
-/// They deliberately have no mesh or transform: the binned render phase keeps a
-/// per-`MainEntity` cache shared across all item kinds, so reusing a real trail
-/// entity (which may also render its own mesh) as the representative makes the
-/// trail item and the mesh item fight over one cache slot — dropping both. A
-/// dedicated anchor entity has a `MainEntity` that nothing else uses, so it
-/// never collides.
-///
-/// The mode is stored here rather than as a [`TrailRenderMode`] component so the
-/// anchors never show up in (or get mutated by) user queries over
-/// `TrailRenderMode`.
+/// Mesh-less on purpose: the binned phase caches per `MainEntity` across item
+/// kinds, so reusing a real trail entity (which may draw its own mesh) would
+/// make the two items fight over one slot and drop both. The mode lives here
+/// (not as a [`TrailRenderMode`] component) so anchors stay out of user queries.
 #[derive(Component, ExtractComponent, Clone, Copy)]
 struct TrailBatchAnchor {
     mode: TrailRenderMode,
 }
 
-/// A [`RenderCommand`] that binds the batched trail buffers for one blend mode
-/// and issues a single instanced draw covering every trail in that batch.
+/// Binds one blend mode's batched buffers and issues a single instanced draw
+/// covering every trail in that batch.
 struct DrawTrailBatch;
 
 impl<P> RenderCommand<P> for DrawTrailBatch
@@ -134,18 +127,13 @@ struct TrailBatches {
     modes: [GpuBatch; 3],
 }
 
-/// Whether any trail's data, mode, or the trail set itself changed since the
-/// last frame. Computed in the main world and extracted, so the render world can
-/// skip re-packing and re-uploading every trail when nothing changed (e.g. a
-/// scene of static, pre-baked trails).
+/// Whether any trail changed this frame. Extracted to the render world so it can
+/// skip the whole repack when nothing changed (e.g. a static scene).
 #[derive(Resource, Default, Clone, Copy, ExtractResource)]
 struct TrailsChanged(bool);
 
-/// Detects, in the main world, whether any trail changed this frame: a mutated
-/// [`TrailData`], [`TrailStyle`], or [`TrailRenderMode`], a spawned trail (a
-/// freshly inserted component reads as `Changed`), or a despawned one. The
-/// result gates the render-world batch repack. Every check is O(changes), not
-/// O(trails), so a static scene costs nothing here.
+/// Sets [`TrailsChanged`] if any trail's data, style, or mode changed, or one
+/// was spawned (reads as `Changed`) or despawned. O(changes), not O(trails).
 fn detect_trail_changes(
     data_changed: Query<(), Changed<TrailData>>,
     style_changed: Query<(), Changed<TrailStyle>>,
@@ -159,14 +147,12 @@ fn detect_trail_changes(
         || !removed.is_empty();
 }
 
-/// Holds the bind group for the view uniform (camera matrices), rebuilt each
-/// frame. Bound at group 0 so the trail shader can project world-space points
-/// into clip space.
+/// Bind group for the view uniform (camera matrices), bound at group 0 so the
+/// shader can project world-space points into clip space. Rebuilt each frame.
 #[derive(Resource, Default)]
 struct TrailViewBindGroup(Option<BindGroup>);
 
-/// A [`RenderCommand`] that binds the view uniform (camera matrices) at the
-/// given group index, using the per-view dynamic offset.
+/// Binds the view uniform at group `I` with the per-view dynamic offset.
 struct SetTrailViewBindGroup<const I: usize>;
 
 impl<P, const I: usize> RenderCommand<P> for SetTrailViewBindGroup<I>
@@ -238,10 +224,8 @@ fn prepare_trail_batches(
     trails: Query<(&TrailData, &TrailStyle, &TrailRenderMode)>,
     mut scratch: Local<[BatchScratch; 3]>,
 ) {
-    // Nothing changed since the batches were last packed → the GPU buffers,
-    // bind groups, and draw parameters are still valid, so skip the full
-    // re-encode + re-upload of every trail. The first frame always reports as
-    // changed (spawned trails read as `Changed`), so the batches build then.
+    // Nothing changed → last frame's buffers and bind groups are still valid.
+    // (The first frame reports changed, so they build then.)
     if !changed.0 {
         return;
     }
@@ -258,10 +242,8 @@ fn prepare_trail_batches(
         let m = *mode as usize;
         let s = &mut scratch[m];
 
-        // The shader indexes this trail's ring modulo `capacity` starting at
-        // `offset`, so exactly `capacity` points must be uploaded. The
-        // `TrailData` constructors guarantee this; assert it here so a hand-built
-        // instance that broke the invariant fails loudly in debug builds.
+        // The shader walks `capacity` points from `offset`, so exactly that many
+        // must be uploaded. Catch a hand-built instance that broke the invariant.
         debug_assert_eq!(
             trail.cpu_data.len(),
             trail.header.capacity as usize,
@@ -275,9 +257,7 @@ fn prepare_trail_batches(
         s.styles.push(style.clone());
         s.points.extend_from_slice(&trail.cpu_data);
 
-        // Size the instanced draw to the live point count (2 verts/point), not
-        // the full capacity, so partially-filled trails don't dispatch vertices
-        // for empty ring slots.
+        // Size the draw to live points (2 verts each), not full capacity.
         max_verts[m] = max_verts[m].max(length * 2);
     }
 
@@ -398,10 +378,7 @@ impl Plugin for TrailRenderPlugin {
         .init_resource::<TrailsChanged>()
         .add_systems(Last, detect_trail_changes);
 
-        // One renderer-owned anchor entity per blend mode. These carry only the
-        // mode (no mesh/transform) and serve as the representative entity for
-        // each batch's phase item, so the binned phase never confuses a batch
-        // with a real trail entity's own rendering.
+        // One anchor entity per blend mode (see `TrailBatchAnchor`).
         for mode in MODES {
             app.world_mut().spawn(TrailBatchAnchor { mode });
         }
@@ -423,7 +400,7 @@ impl Plugin for TrailRenderPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        // CustomPhasePipeline needs RenderDevice to be created, which doesn't happen until App::run
+        // TrailPipeline needs RenderDevice, which isn't created until App::run.
         let render_app = app.sub_app_mut(RenderApp);
         render_app.init_resource::<TrailPipeline>();
     }
@@ -476,10 +453,8 @@ fn queue_custom_phase_item(
                 continue;
             };
 
-            // Bump the change tick to force Bevy to rebuild this item's bin.
-            // Only three items (one per mode) are ever (re)bound, so doing this
-            // every frame costs nothing; the monotonic counter is a `Tick` and
-            // wraps safely, exactly like the world change tick.
+            // Bump the tick so Bevy rebuilds this item's bin. Only three items
+            // exist, so doing it every frame is free; the `Tick` wraps safely.
             let this_tick = next_tick.get() + 1;
             next_tick.set(this_tick);
 
@@ -506,7 +481,8 @@ fn queue_custom_phase_item(
 
 #[derive(Resource)]
 struct TrailPipeline {
-    /// the `variants` collection holds onto the shader handle through the base descriptor
+    /// Specialized pipeline variants; also keeps the shader handle alive via the
+    /// base descriptor.
     variants: Variants<RenderPipeline, TrailPipelineSpecializer>,
     /// Layout for the view uniform bind group (group 0).
     view_layout: BindGroupLayoutDescriptor,

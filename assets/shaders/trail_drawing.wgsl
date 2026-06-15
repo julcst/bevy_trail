@@ -81,11 +81,9 @@ fn vertex(@builtin(instance_index) inst: u32, @builtin(vertex_index) vidx: u32) 
     let idx = min(vidx / 2u, header.length - 1u);
     let curr = get_point(header, idx);
     let forward = calc_tangent(header, idx);
-    // A max_time / max_length of 0 disables that clipping axis. The age and
-    // length terms are <= 0, so a neutral -1.0 lets the *other* axis fully drive
-    // the gradient; guarding here avoids a divide-by-zero that would make the
-    // color and width NaN (and the whole trail vanish). With both axes disabled
-    // the trail is a uniform end_color.
+    // A max_time / max_length of 0 disables that axis: feed -1.0 so the other
+    // axis drives the gradient, avoiding a divide-by-zero that would NaN the
+    // color/width and hide the trail. Both disabled → uniform end_color.
     let time = select((curr.time - header.current_time) / header.max_time, -1.0, header.max_time <= 0.0);
     let length = select((curr.length - header.current_length) / header.max_length, -1.0, header.max_length <= 0.0);
     let t = clamp(time * length, 0.0, 1.0);
