@@ -1,5 +1,7 @@
 //! Core data types for trail rendering.
 
+use std::sync::Arc;
+
 use bevy::{
     prelude::*,
     render::{extract_component::ExtractComponent, render_resource::ShaderType},
@@ -211,7 +213,11 @@ pub struct TrailData {
     /// Live ring-buffer points, in **world space**. The renderer concatenates
     /// these across all trails into one shared GPU buffer and draws them in a
     /// single instanced draw call (see [`crate::render`]).
-    pub cpu_data: Vec<TrailPoint>,
+    ///
+    /// Held behind an [`Arc`] so extracting the trail into the render world each
+    /// frame is a cheap pointer clone; the emitter mutates it via
+    /// [`Arc::make_mut`], which only deep-copies when a trail actually changes.
+    pub cpu_data: Arc<Vec<TrailPoint>>,
     pub style: TrailStyle,
 }
 

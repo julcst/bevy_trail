@@ -15,6 +15,7 @@ use bevy::{
     prelude::*,
     render::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
             RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
@@ -32,7 +33,7 @@ use bevy::{
         },
         renderer::{RenderDevice, RenderQueue},
         sync_world::MainEntity,
-        view::{ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms},
+        view::{ExtractedView, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms},
         Render, RenderApp, RenderSystems,
     },
 };
@@ -46,8 +47,8 @@ const MODES: [TrailRenderMode; 3] = [
 ];
 
 /// A render-world draw anchor for one blend-mode batch. The renderer owns three
-/// of these (one per [`TrailRenderMode`]), each carrying its mode, and uses them
-/// as the representative entity for that batch's phase item.
+/// of these (one per [`TrailRenderMode`]), each tagged with the mode it draws,
+/// and uses them as the representative entity for that batch's phase item.
 ///
 /// They deliberately have no mesh or transform: the binned render phase keeps a
 /// per-`MainEntity` cache shared across all item kinds, so reusing a real trail
@@ -55,8 +56,14 @@ const MODES: [TrailRenderMode; 3] = [
 /// trail item and the mesh item fight over one cache slot — dropping both. A
 /// dedicated anchor entity has a `MainEntity` that nothing else uses, so it
 /// never collides.
+///
+/// The mode is stored here rather than as a [`TrailRenderMode`] component so the
+/// anchors never show up in (or get mutated by) user queries over
+/// `TrailRenderMode`.
 #[derive(Component, ExtractComponent, Clone, Copy)]
-struct TrailBatchAnchor;
+struct TrailBatchAnchor {
+    mode: TrailRenderMode,
+}
 
 /// A [`RenderCommand`] that binds the batched trail buffers for one blend mode
 /// and issues a single instanced draw covering every trail in that batch.
@@ -68,21 +75,21 @@ where
 {
     type Param = SRes<TrailBatches>;
     type ViewQuery = ();
-    // The phase item's entity is a representative trail; its render mode tells us
-    // which batch this draw is for.
-    type ItemQuery = bevy::ecs::system::lifetimeless::Read<TrailRenderMode>;
+    // The phase item's entity is the batch anchor; its mode tells us which batch
+    // this draw is for.
+    type ItemQuery = bevy::ecs::system::lifetimeless::Read<TrailBatchAnchor>;
 
     fn render<'w>(
         _item: &P,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        mode: Option<&'w TrailRenderMode>,
+        anchor: Option<&'w TrailBatchAnchor>,
         param: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(mode) = mode else {
+        let Some(anchor) = anchor else {
             return RenderCommandResult::Skip;
         };
-        let batch = &param.into_inner().modes[*mode as usize];
+        let batch = &param.into_inner().modes[anchor.mode as usize];
 
         let Some(bind_group) = batch.bind_group.as_ref() else {
             return RenderCommandResult::Skip;
@@ -98,21 +105,26 @@ where
     }
 }
 
+/// A GPU storage buffer that grows on demand and remembers its capacity, so a
+/// steady or shrinking trail count doesn't reallocate every frame.
+#[derive(Default)]
+struct GrowBuffer {
+    buffer: Option<Buffer>,
+    capacity: u64,
+}
+
 /// Per-blend-mode batch of trails: shared GPU buffers, one bind group, and the
 /// instanced draw parameters. Buffers are kept across frames and only grown
 /// (which forces a bind-group rebuild) when the trail count rises.
 #[derive(Default)]
 struct GpuBatch {
-    headers: Option<Buffer>,
-    points: Option<Buffer>,
-    styles: Option<Buffer>,
-    headers_cap: u64,
-    points_cap: u64,
-    styles_cap: u64,
+    headers: GrowBuffer,
+    points: GrowBuffer,
+    styles: GrowBuffer,
     bind_group: Option<BindGroup>,
     /// Number of trails (= instances) in this batch.
     instance_count: u32,
-    /// Vertices per instance: 2 per ring point, sized to the largest trail.
+    /// Vertices per instance: 2 per live ring point, sized to the longest trail.
     max_verts: u32,
 }
 
@@ -120,6 +132,31 @@ struct GpuBatch {
 struct TrailBatches {
     /// One batch per blend mode, indexed by `TrailRenderMode as usize`.
     modes: [GpuBatch; 3],
+    /// Set once the batches have been packed at least once, so the first frame
+    /// always builds even if nothing reports as "changed".
+    built: bool,
+}
+
+/// Whether any trail's data, mode, or the trail set itself changed since the
+/// last frame. Computed in the main world and extracted, so the render world can
+/// skip re-packing and re-uploading every trail when nothing changed (e.g. a
+/// scene of static, pre-baked trails).
+#[derive(Resource, Default, Clone, Copy, ExtractResource)]
+struct TrailsChanged(bool);
+
+/// Detects, in the main world, whether any trail changed this frame: a mutated
+/// [`TrailData`] or [`TrailRenderMode`], or a different trail count (spawns and
+/// despawns). The result gates the render-world batch repack.
+fn detect_trail_changes(
+    data_changed: Query<(), Changed<TrailData>>,
+    mode_changed: Query<(), Changed<TrailRenderMode>>,
+    trails: Query<(), With<TrailData>>,
+    mut last_count: Local<usize>,
+    mut changed: ResMut<TrailsChanged>,
+) {
+    let count = trails.iter().count();
+    changed.0 = count != *last_count || !data_changed.is_empty() || !mode_changed.is_empty();
+    *last_count = count;
 }
 
 /// Holds the bind group for the view uniform (camera matrices), rebuilt each
@@ -190,15 +227,24 @@ struct BatchScratch {
 
 /// Packs every trail into per-mode shared storage buffers (headers, ring points,
 /// styles) and uploads them, ready for one instanced draw per mode.
+#[allow(clippy::too_many_arguments)]
 fn prepare_trail_batches(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     pipeline: Res<TrailPipeline>,
     pipeline_cache: Res<PipelineCache>,
+    changed: Res<TrailsChanged>,
     mut batches: ResMut<TrailBatches>,
     trails: Query<(&TrailData, &TrailRenderMode)>,
     mut scratch: Local<[BatchScratch; 3]>,
 ) {
+    // Nothing changed since the batches were last packed → the GPU buffers,
+    // bind groups, and draw parameters are still valid, so skip the full
+    // re-encode + re-upload of every trail.
+    if batches.built && !changed.0 {
+        return;
+    }
+
     for s in scratch.iter_mut() {
         s.headers.clear();
         s.points.clear();
@@ -211,13 +257,30 @@ fn prepare_trail_batches(
         let m = *mode as usize;
         let s = &mut scratch[m];
 
+        let capacity = trail.header.capacity.max(1);
         let mut header = trail.header.clone();
+        header.capacity = capacity;
+        // Live points can never exceed the ring capacity; clamp defensively so a
+        // hand-built `TrailData` (the low-level escape hatch) can't drive the
+        // shader's `length`/`capacity` indexing out of bounds.
+        header.length = header.length.min(capacity);
         header.offset = s.points.len() as u32;
+        let length = header.length;
         s.headers.push(header);
         s.styles.push(trail.style.clone());
-        s.points.extend_from_slice(&trail.cpu_data);
 
-        max_verts[m] = max_verts[m].max(trail.header.capacity * 2);
+        // The shader indexes this trail's ring modulo `capacity` starting at
+        // `offset`, so exactly `capacity` points must be uploaded. Truncate or
+        // pad to match in case `cpu_data`'s length disagrees with `capacity`.
+        let start = s.points.len();
+        s.points
+            .extend(trail.cpu_data.iter().take(capacity as usize).cloned());
+        s.points.resize(start + capacity as usize, TrailPoint::default());
+
+        // Size the instanced draw to the live point count (2 verts/point), not
+        // the full capacity, so partially-filled trails don't dispatch vertices
+        // for empty ring slots.
+        max_verts[m] = max_verts[m].max(length * 2);
     }
 
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.batch_layout);
@@ -238,7 +301,6 @@ fn prepare_trail_batches(
             &render_device,
             &render_queue,
             &mut batch.headers,
-            &mut batch.headers_cap,
             &s.headers,
             &mut s.bytes,
             "trail_batch_headers",
@@ -247,7 +309,6 @@ fn prepare_trail_batches(
             &render_device,
             &render_queue,
             &mut batch.points,
-            &mut batch.points_cap,
             &s.points,
             &mut s.bytes,
             "trail_batch_points",
@@ -256,7 +317,6 @@ fn prepare_trail_batches(
             &render_device,
             &render_queue,
             &mut batch.styles,
-            &mut batch.styles_cap,
             &s.styles,
             &mut s.bytes,
             "trail_batch_styles",
@@ -268,13 +328,15 @@ fn prepare_trail_batches(
                 "trail_batch_bind_group",
                 &layout,
                 &BindGroupEntries::sequential((
-                    batch.headers.as_ref().unwrap().as_entire_binding(),
-                    batch.points.as_ref().unwrap().as_entire_binding(),
-                    batch.styles.as_ref().unwrap().as_entire_binding(),
+                    batch.headers.buffer.as_ref().unwrap().as_entire_binding(),
+                    batch.points.buffer.as_ref().unwrap().as_entire_binding(),
+                    batch.styles.buffer.as_ref().unwrap().as_entire_binding(),
                 )),
             ));
         }
     }
+
+    batches.built = true;
 }
 
 /// Encodes `data` (a `ShaderType` array) into `scratch`, ensures `buffer` is at
@@ -284,8 +346,7 @@ fn prepare_trail_batches(
 fn ensure_and_write<T>(
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
-    buffer: &mut Option<Buffer>,
-    capacity: &mut u64,
+    target: &mut GrowBuffer,
     data: &Vec<T>,
     scratch: &mut Vec<u8>,
     label: &'static str,
@@ -303,21 +364,21 @@ where
     let size = scratch.len() as u64;
 
     let mut reallocated = false;
-    if buffer.is_none() || *capacity < size {
+    if target.buffer.is_none() || target.capacity < size {
         // Grow with 50% headroom so a steadily increasing trail count doesn't
         // reallocate every frame.
         let new_cap = (size + size / 2).max(size);
-        *buffer = Some(render_device.create_buffer(&BufferDescriptor {
+        target.buffer = Some(render_device.create_buffer(&BufferDescriptor {
             label: Some(label),
             size: new_cap,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        *capacity = new_cap;
+        target.capacity = new_cap;
         reallocated = true;
     }
 
-    render_queue.write_buffer(buffer.as_ref().unwrap(), 0, scratch);
+    render_queue.write_buffer(target.buffer.as_ref().unwrap(), 0, scratch);
     reallocated
 }
 
@@ -333,14 +394,19 @@ impl Plugin for TrailRenderPlugin {
             ExtractComponentPlugin::<TrailData>::default(),
             ExtractComponentPlugin::<TrailRenderMode>::default(),
             ExtractComponentPlugin::<TrailBatchAnchor>::default(),
-        ));
+            ExtractResourcePlugin::<TrailsChanged>::default(),
+        ))
+        // Runs after the Update systems that mutate trails (emit/sync) and
+        // before extract, so the flag reflects the same data that gets extracted.
+        .init_resource::<TrailsChanged>()
+        .add_systems(Last, detect_trail_changes);
 
         // One renderer-owned anchor entity per blend mode. These carry only the
         // mode (no mesh/transform) and serve as the representative entity for
         // each batch's phase item, so the binned phase never confuses a batch
         // with a real trail entity's own rendering.
         for mode in MODES {
-            app.world_mut().spawn((mode, TrailBatchAnchor));
+            app.world_mut().spawn(TrailBatchAnchor { mode });
         }
 
         // Render World
@@ -368,13 +434,14 @@ impl Plugin for TrailRenderPlugin {
 
 /// Enqueues one batched phase item per (view, non-empty blend mode). Each item
 /// expands into a single instanced draw covering all trails of that mode.
+#[allow(clippy::too_many_arguments)]
 fn queue_custom_phase_item(
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<TrailPipeline>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
     batches: Res<TrailBatches>,
-    anchors: Query<(Entity, &MainEntity, &TrailRenderMode), With<TrailBatchAnchor>>,
+    anchors: Query<(Entity, &MainEntity, &TrailBatchAnchor)>,
     views: Query<(&ExtractedView, &Msaa)>,
     mut next_tick: Local<Tick>,
 ) {
@@ -382,8 +449,8 @@ fn queue_custom_phase_item(
 
     // The renderer-owned anchor entity that represents each blend mode's batch.
     let mut anchor_by_mode: [Option<(Entity, MainEntity)>; 3] = [None; 3];
-    for (entity, main, mode) in anchors.iter() {
-        anchor_by_mode[*mode as usize] = Some((entity, *main));
+    for (entity, main, anchor) in anchors.iter() {
+        anchor_by_mode[anchor.mode as usize] = Some((entity, *main));
     }
 
     for (view, msaa) in views.iter() {
@@ -401,14 +468,21 @@ fn queue_custom_phase_item(
             };
 
             let mode = MODES[m];
-            let Ok(pipeline_id) = pipeline
-                .variants
-                .specialize(&pipeline_cache, TrailPipelineKey { msaa: *msaa, mode })
-            else {
+            let Ok(pipeline_id) = pipeline.variants.specialize(
+                &pipeline_cache,
+                TrailPipelineKey {
+                    msaa: *msaa,
+                    mode,
+                    hdr: view.hdr,
+                },
+            ) else {
                 continue;
             };
 
-            // Bump the change tick in order to force Bevy to rebuild the bin.
+            // Bump the change tick to force Bevy to rebuild this item's bin.
+            // Only three items (one per mode) are ever (re)bound, so doing this
+            // every frame costs nothing; the monotonic counter is a `Tick` and
+            // wraps safely, exactly like the world change tick.
             let this_tick = next_tick.get() + 1;
             next_tick.set(this_tick);
 
@@ -520,6 +594,8 @@ impl FromWorld for TrailPipeline {
 struct TrailPipelineKey {
     msaa: Msaa,
     mode: TrailRenderMode,
+    /// Whether the target view is HDR, so the color target format matches it.
+    hdr: bool,
 }
 
 struct TrailPipelineSpecializer;
@@ -554,8 +630,17 @@ impl Specializer<RenderPipeline> for TrailPipelineSpecializer {
             TrailRenderMode::Transparent => Some(BlendState::ALPHA_BLENDING),
         };
 
+        // Match the view's render target format so HDR cameras (e.g. for bloom)
+        // don't hit a pipeline/target format mismatch.
+        let format = if key.hdr {
+            ViewTarget::TEXTURE_FORMAT_HDR
+        } else {
+            TextureFormat::bevy_default()
+        };
+
         if let Some(fragment) = descriptor.fragment.as_mut() {
             for target in fragment.targets.iter_mut().flatten() {
+                target.format = format;
                 target.blend = blend;
             }
         }

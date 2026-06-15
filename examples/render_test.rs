@@ -50,7 +50,7 @@ fn setup(mut commands: Commands) {
             current_time: 1.0,
             ..default()
         },
-        cpu_data,
+        cpu_data: std::sync::Arc::new(cpu_data),
         style: TrailStyle {
             start_color: LinearRgba::WHITE,
             end_color: LinearRgba::RED,

@@ -95,7 +95,7 @@ fn init_trails(
 ) {
     for (entity, trail, style) in &query {
         let capacity = trail.capacity.max(1);
-        let cpu_data = vec![TrailPoint::default(); capacity as usize];
+        let cpu_data = std::sync::Arc::new(vec![TrailPoint::default(); capacity as usize]);
 
         commands.entity(entity).insert(TrailData {
             header: TrailHeader {

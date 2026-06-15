@@ -1,5 +1,7 @@
 //! Automatic emission: trails that follow their entity's [`GlobalTransform`].
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 
 use crate::types::{Trail, TrailData, TrailHeader, TrailPoint};
@@ -33,9 +35,18 @@ pub struct TrailEmitter {
 impl TrailEmitter {
     /// Resolves the sample spacing, falling back to `max_length / capacity` so a
     /// default trail keeps roughly `capacity` points across its visible length.
+    ///
+    /// When length clipping is disabled (`max_length == 0`) the derived spacing
+    /// would be `0`, which makes `should_emit`'s `>= spacing` test always true
+    /// and emits a point every frame even for a stationary entity. We floor it
+    /// to a tiny positive value so emission stays distance-gated; set
+    /// [`min_distance`](Self::min_distance) explicitly to control spacing in that
+    /// case.
     fn spacing(&self, header: &TrailHeader) -> f32 {
-        self.min_distance
-            .unwrap_or_else(|| header.max_length / header.capacity.max(1) as f32)
+        self.min_distance.unwrap_or_else(|| {
+            let derived = header.max_length / header.capacity.max(1) as f32;
+            derived.max(f32::EPSILON)
+        })
     }
 }
 
@@ -71,19 +82,21 @@ pub(crate) fn emit_points_system(
 
             if should_emit {
                 // Increment header
-                let capacity = trail.header.capacity as usize;
-                trail.cpu_data.resize_with(capacity, Default::default);
-                trail.header.head = (trail.header.head + 1) % trail.header.capacity;
-                trail.header.length = (trail.header.length + 1).min(trail.header.capacity);
+                let capacity = trail.header.capacity;
+                trail.header.head = (trail.header.head + 1) % capacity;
+                trail.header.length = (trail.header.length + 1).min(capacity);
 
-                // Write new head
+                // Write new head. `make_mut` only clones the ring when it is still
+                // shared with the render world (i.e. when this trail changed).
                 let head = trail.header.head as usize;
-                trail.cpu_data[head] = point.clone();
+                let data = Arc::make_mut(&mut trail.cpu_data);
+                data.resize_with(capacity as usize, Default::default);
+                data[head] = point.clone();
                 emitter.last = Some(point);
             } else if !emitter.lazy {
                 // Overwrite head
                 let head = trail.header.head as usize;
-                trail.cpu_data[head] = point;
+                Arc::make_mut(&mut trail.cpu_data)[head] = point;
             }
 
             // Clip the tail. A 0 budget disables that axis; with both disabled
