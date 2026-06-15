@@ -132,9 +132,6 @@ struct GpuBatch {
 struct TrailBatches {
     /// One batch per blend mode, indexed by `TrailRenderMode as usize`.
     modes: [GpuBatch; 3],
-    /// Set once the batches have been packed at least once, so the first frame
-    /// always builds even if nothing reports as "changed".
-    built: bool,
 }
 
 /// Whether any trail's data, mode, or the trail set itself changed since the
@@ -145,18 +142,21 @@ struct TrailBatches {
 struct TrailsChanged(bool);
 
 /// Detects, in the main world, whether any trail changed this frame: a mutated
-/// [`TrailData`] or [`TrailRenderMode`], or a different trail count (spawns and
-/// despawns). The result gates the render-world batch repack.
+/// [`TrailData`], [`TrailStyle`], or [`TrailRenderMode`], a spawned trail (a
+/// freshly inserted component reads as `Changed`), or a despawned one. The
+/// result gates the render-world batch repack. Every check is O(changes), not
+/// O(trails), so a static scene costs nothing here.
 fn detect_trail_changes(
     data_changed: Query<(), Changed<TrailData>>,
+    style_changed: Query<(), Changed<TrailStyle>>,
     mode_changed: Query<(), Changed<TrailRenderMode>>,
-    trails: Query<(), With<TrailData>>,
-    mut last_count: Local<usize>,
+    removed: RemovedComponents<TrailData>,
     mut changed: ResMut<TrailsChanged>,
 ) {
-    let count = trails.iter().count();
-    changed.0 = count != *last_count || !data_changed.is_empty() || !mode_changed.is_empty();
-    *last_count = count;
+    changed.0 = !data_changed.is_empty()
+        || !style_changed.is_empty()
+        || !mode_changed.is_empty()
+        || !removed.is_empty();
 }
 
 /// Holds the bind group for the view uniform (camera matrices), rebuilt each
@@ -235,13 +235,14 @@ fn prepare_trail_batches(
     pipeline_cache: Res<PipelineCache>,
     changed: Res<TrailsChanged>,
     mut batches: ResMut<TrailBatches>,
-    trails: Query<(&TrailData, &TrailRenderMode)>,
+    trails: Query<(&TrailData, &TrailStyle, &TrailRenderMode)>,
     mut scratch: Local<[BatchScratch; 3]>,
 ) {
     // Nothing changed since the batches were last packed → the GPU buffers,
     // bind groups, and draw parameters are still valid, so skip the full
-    // re-encode + re-upload of every trail.
-    if batches.built && !changed.0 {
+    // re-encode + re-upload of every trail. The first frame always reports as
+    // changed (spawned trails read as `Changed`), so the batches build then.
+    if !changed.0 {
         return;
     }
 
@@ -253,29 +254,26 @@ fn prepare_trail_batches(
 
     let mut max_verts = [0u32; 3];
 
-    for (trail, mode) in &trails {
+    for (trail, style, mode) in &trails {
         let m = *mode as usize;
         let s = &mut scratch[m];
 
-        let capacity = trail.header.capacity.max(1);
+        // The shader indexes this trail's ring modulo `capacity` starting at
+        // `offset`, so exactly `capacity` points must be uploaded. The
+        // `TrailData` constructors guarantee this; assert it here so a hand-built
+        // instance that broke the invariant fails loudly in debug builds.
+        debug_assert_eq!(
+            trail.cpu_data.len(),
+            trail.header.capacity as usize,
+            "TrailData invariant violated: cpu_data.len() must equal header.capacity"
+        );
+
         let mut header = trail.header.clone();
-        header.capacity = capacity;
-        // Live points can never exceed the ring capacity; clamp defensively so a
-        // hand-built `TrailData` (the low-level escape hatch) can't drive the
-        // shader's `length`/`capacity` indexing out of bounds.
-        header.length = header.length.min(capacity);
         header.offset = s.points.len() as u32;
         let length = header.length;
         s.headers.push(header);
-        s.styles.push(trail.style.clone());
-
-        // The shader indexes this trail's ring modulo `capacity` starting at
-        // `offset`, so exactly `capacity` points must be uploaded. Truncate or
-        // pad to match in case `cpu_data`'s length disagrees with `capacity`.
-        let start = s.points.len();
-        s.points
-            .extend(trail.cpu_data.iter().take(capacity as usize).cloned());
-        s.points.resize(start + capacity as usize, TrailPoint::default());
+        s.styles.push(style.clone());
+        s.points.extend_from_slice(&trail.cpu_data);
 
         // Size the instanced draw to the live point count (2 verts/point), not
         // the full capacity, so partially-filled trails don't dispatch vertices
@@ -335,8 +333,6 @@ fn prepare_trail_batches(
             ));
         }
     }
-
-    batches.built = true;
 }
 
 /// Encodes `data` (a `ShaderType` array) into `scratch`, ensures `buffer` is at
@@ -347,7 +343,7 @@ fn ensure_and_write<T>(
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
     target: &mut GrowBuffer,
-    data: &Vec<T>,
+    data: &[T],
     scratch: &mut Vec<u8>,
     label: &'static str,
 ) -> bool
@@ -392,6 +388,7 @@ impl Plugin for TrailRenderPlugin {
         // Main World
         app.add_plugins((
             ExtractComponentPlugin::<TrailData>::default(),
+            ExtractComponentPlugin::<TrailStyle>::default(),
             ExtractComponentPlugin::<TrailRenderMode>::default(),
             ExtractComponentPlugin::<TrailBatchAnchor>::default(),
             ExtractResourcePlugin::<TrailsChanged>::default(),
@@ -559,9 +556,9 @@ impl FromWorld for TrailPipeline {
             fragment: Some(FragmentState {
                 shader: shader.clone(),
                 targets: vec![Some(ColorTargetState {
-                    // Ordinarily, you'd want to check whether the view has the
-                    // HDR format and substitute the appropriate texture format
-                    // here, but we omit that for simplicity.
+                    // Placeholder format; the specializer overwrites this with
+                    // the view's actual format (HDR vs. default) based on
+                    // `TrailPipelineKey::hdr`.
                     format: TextureFormat::bevy_default(),
                     blend: None,
                     write_mask: ColorWrites::ALL,

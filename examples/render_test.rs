@@ -10,7 +10,7 @@ use std::f32::consts::TAU;
 
 use bevy::prelude::*;
 use bevy_trail::{
-    types::{TrailData, TrailHeader, TrailPoint, TrailStyle},
+    types::{TrailData, TrailPoint, TrailStyle},
     TrailPlugin,
 };
 
@@ -37,27 +37,18 @@ fn setup(mut commands: Commands) {
         })
         .collect::<Vec<_>>();
 
-    // A bare `TrailData` is enough — the renderer batches its world-space points
-    // into the shared GPU buffers. `TrailRenderMode` is supplied via `#[require]`.
-    commands.spawn(TrailData {
-        header: TrailHeader {
-            head: n - 1,
-            length: n,
-            capacity: n,
-            max_length: 1.0,
-            max_time: 1.0,
-            current_length: 1.0,
-            current_time: 1.0,
-            ..default()
-        },
-        cpu_data: std::sync::Arc::new(cpu_data),
-        style: TrailStyle {
+    // `from_points` builds the ring header for us; pairing it with a `TrailStyle`
+    // is enough — the renderer batches the world-space points into the shared GPU
+    // buffers. `TrailRenderMode` is supplied via `#[require]`.
+    commands.spawn((
+        TrailData::from_points(cpu_data, 1.0, 1.0),
+        TrailStyle {
             start_color: LinearRgba::WHITE,
             end_color: LinearRgba::RED,
             start_width: 0.05,
             ..default()
         },
-    });
+    ));
 
     // Spawn the camera.
     commands.spawn((

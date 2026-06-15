@@ -46,8 +46,10 @@ pub enum TrailRenderMode {
 ///
 /// This is a [`Component`] in its own right, so it can be queried and mutated
 /// independently of the rest of the trail (e.g. to animate colors or width at
-/// runtime). [`Trail`] inserts a default one for you via `#[require]`.
-#[derive(Component, Clone, Debug, ShaderType)]
+/// runtime). [`Trail`] inserts a default one for you via `#[require]`. The
+/// renderer reads it straight off each trail entity (it is an [`ExtractComponent`]),
+/// so mutating it animates the trail with no extra bookkeeping.
+#[derive(Component, ExtractComponent, Clone, Debug, ShaderType)]
 pub struct TrailStyle {
     pub start_color: LinearRgba,
     pub end_color: LinearRgba,
@@ -193,21 +195,33 @@ impl Default for TrailHeader {
     }
 }
 
-/// The renderable state of a trail: its world-space ring buffer, the header
-/// describing the live segment, and a copy of the style.
+/// The renderable state of a trail: its world-space ring buffer and the header
+/// describing the live segment.
 ///
 /// This is a plain data component, **not** a render object — it carries no
 /// `Visibility`, `Aabb`, or visibility class. Every frame the renderer simply
-/// collects the [`TrailData`] of all trails and packs them into shared GPU
-/// buffers for one batched instanced draw (see [`crate::render`]), so a trail
-/// adds no per-entity draw, bind group, or culling bookkeeping.
+/// collects the [`TrailData`], [`TrailStyle`], and [`TrailRenderMode`] of all
+/// trails and packs them into shared GPU buffers for one batched instanced draw
+/// (see [`crate::render`]), so a trail adds no per-entity draw, bind group, or
+/// culling bookkeeping.
 ///
-/// The plugin inserts and maintains this automatically from [`Trail`] and
-/// [`TrailStyle`]; you normally never construct it yourself. It is public only
-/// for advanced, low-level use (e.g. feeding a pre-baked, static trail), in
-/// which case [`TrailRenderMode`] is supplied for you via `#[require]`.
-#[derive(Clone, Component, Default)]
-#[require(TrailRenderMode)]
+/// The plugin inserts and maintains this automatically from [`Trail`]; you
+/// normally never construct it yourself. It is public only for advanced,
+/// low-level use (e.g. feeding a pre-baked, static trail via [`from_points`]),
+/// in which case [`TrailStyle`] and [`TrailRenderMode`] are supplied for you via
+/// `#[require]`.
+///
+/// # Invariant
+///
+/// `cpu_data.len() == header.capacity` and `header.length <= header.capacity`.
+/// The constructors establish this and the emitter preserves it; the renderer
+/// relies on it. Build instances with [`new`] or [`from_points`] rather than the
+/// struct literal so you can't violate it by accident.
+///
+/// [`new`]: Self::new
+/// [`from_points`]: Self::from_points
+#[derive(Clone, Component)]
+#[require(TrailStyle, TrailRenderMode)]
 pub struct TrailData {
     pub header: TrailHeader,
     /// Live ring-buffer points, in **world space**. The renderer concatenates
@@ -218,15 +232,52 @@ pub struct TrailData {
     /// frame is a cheap pointer clone; the emitter mutates it via
     /// [`Arc::make_mut`], which only deep-copies when a trail actually changes.
     pub cpu_data: Arc<Vec<TrailPoint>>,
-    pub style: TrailStyle,
 }
 
-/// Extract [`TrailData`] into the render world.
-///
-/// The ring points (`cpu_data`) are carried across so the renderer can pack
-/// every trail's points into one shared GPU buffer and draw them all in a single
-/// instanced draw call (see [`crate::render`]). This avoids both per-frame GPU
-/// buffer reallocation and one draw call + bind group per trail.
+impl TrailData {
+    /// Empty ring storage for a trail of `capacity` points, with the given
+    /// clipping budgets (`0.0` disables an axis). Used by the plugin to back a
+    /// [`Trail`]; the emitter fills the ring over time.
+    pub fn new(capacity: u32, max_length: f32, max_time: f32) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            header: TrailHeader {
+                capacity,
+                max_length,
+                max_time,
+                ..default()
+            },
+            cpu_data: Arc::new(vec![TrailPoint::default(); capacity as usize]),
+        }
+    }
+
+    /// A pre-filled, static trail from explicit world-space `points`, newest
+    /// last. The ring is sized exactly to the points and treated as fully live,
+    /// so the renderer draws all of them; `max_time`/`max_length` (`0.0` to
+    /// disable) drive the age/length color gradient in the shader.
+    pub fn from_points(points: Vec<TrailPoint>, max_time: f32, max_length: f32) -> Self {
+        let len = points.len() as u32;
+        let last = points.last();
+        Self {
+            header: TrailHeader {
+                head: len.saturating_sub(1),
+                length: len,
+                capacity: len,
+                current_time: last.map_or(0.0, |p| p.time),
+                current_length: last.map_or(0.0, |p| p.length),
+                max_time,
+                max_length,
+                ..default()
+            },
+            cpu_data: Arc::new(points),
+        }
+    }
+}
+
+/// Extract [`TrailData`] into the render world: a cheap clone, since `cpu_data`
+/// is an [`Arc`]. The renderer packs every trail's points into one shared GPU
+/// buffer and draws them in a single instanced call (see [`crate::render`]),
+/// avoiding both per-frame buffer reallocation and one draw call per trail.
 impl ExtractComponent for TrailData {
     type QueryData = &'static TrailData;
     type QueryFilter = ();
@@ -235,10 +286,6 @@ impl ExtractComponent for TrailData {
     fn extract_component(
         item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
     ) -> Option<Self::Out> {
-        Some(TrailData {
-            header: item.header.clone(),
-            cpu_data: item.cpu_data.clone(),
-            style: item.style.clone(),
-        })
+        Some(item.clone())
     }
 }

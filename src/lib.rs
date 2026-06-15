@@ -41,7 +41,7 @@ use bevy::prelude::*;
 use crate::{
     emitter::emit_points_system,
     render::TrailRenderPlugin,
-    types::{Trail, TrailData, TrailHeader, TrailPoint, TrailStyle},
+    types::{Trail, TrailData},
 };
 
 pub mod prelude {
@@ -59,8 +59,6 @@ pub enum TrailSystems {
     Init,
     /// Produces new trail points (e.g. from emitters).
     Emit,
-    /// Mirrors user-facing component state into [`TrailData`].
-    Sync,
 }
 
 /// Adds everything needed to spawn and render trails: emission, trail-state
@@ -70,16 +68,12 @@ pub struct TrailPlugin;
 impl Plugin for TrailPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(TrailRenderPlugin)
-            .configure_sets(
-                Update,
-                (TrailSystems::Init, TrailSystems::Emit, TrailSystems::Sync).chain(),
-            )
+            .configure_sets(Update, (TrailSystems::Init, TrailSystems::Emit).chain())
             .add_systems(
                 Update,
                 (
                     init_trails.in_set(TrailSystems::Init),
                     emit_points_system.in_set(TrailSystems::Emit),
-                    sync_trail_style.in_set(TrailSystems::Sync),
                 ),
             );
     }
@@ -89,31 +83,10 @@ impl Plugin for TrailPlugin {
 /// isn't initialized yet. No GPU buffers are allocated here: the renderer packs
 /// every trail's points into shared batched buffers each frame (see
 /// [`crate::render`]).
-fn init_trails(
-    mut commands: Commands,
-    query: Query<(Entity, &Trail, &TrailStyle), Without<TrailData>>,
-) {
-    for (entity, trail, style) in &query {
-        let capacity = trail.capacity.max(1);
-        let cpu_data = std::sync::Arc::new(vec![TrailPoint::default(); capacity as usize]);
-
-        commands.entity(entity).insert(TrailData {
-            header: TrailHeader {
-                capacity,
-                max_length: trail.max_length,
-                max_time: trail.max_time,
-                ..default()
-            },
-            cpu_data,
-            style: style.clone(),
-        });
-    }
-}
-
-/// Mirrors the user-facing [`TrailStyle`] component into the GPU bind data when
-/// it changes, so styles can be animated by simply mutating the component.
-fn sync_trail_style(mut query: Query<(&TrailStyle, &mut TrailData), Changed<TrailStyle>>) {
-    for (style, mut data) in &mut query {
-        data.style = style.clone();
+fn init_trails(mut commands: Commands, query: Query<(Entity, &Trail), Without<TrailData>>) {
+    for (entity, trail) in &query {
+        commands
+            .entity(entity)
+            .insert(TrailData::new(trail.capacity, trail.max_length, trail.max_time));
     }
 }

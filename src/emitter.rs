@@ -33,19 +33,18 @@ pub struct TrailEmitter {
 }
 
 impl TrailEmitter {
-    /// Resolves the sample spacing, falling back to `max_length / capacity` so a
+    /// Resolves the minimum travel distance between emitted points: an explicit
+    /// [`min_distance`](Self::min_distance), else `max_length / capacity` so a
     /// default trail keeps roughly `capacity` points across its visible length.
     ///
-    /// When length clipping is disabled (`max_length == 0`) the derived spacing
-    /// would be `0`, which makes `should_emit`'s `>= spacing` test always true
-    /// and emits a point every frame even for a stationary entity. We floor it
-    /// to a tiny positive value so emission stays distance-gated; set
-    /// [`min_distance`](Self::min_distance) explicitly to control spacing in that
-    /// case.
-    fn spacing(&self, header: &TrailHeader) -> f32 {
-        self.min_distance.unwrap_or_else(|| {
+    /// Returns `None` when there is no length budget to derive from
+    /// (`max_length == 0`, length clipping disabled) and no explicit
+    /// `min_distance`; the emitter then emits on any movement (see
+    /// [`emit_points_system`]). Set `min_distance` to gate spacing in that case.
+    fn spacing(&self, header: &TrailHeader) -> Option<f32> {
+        self.min_distance.or_else(|| {
             let derived = header.max_length / header.capacity.max(1) as f32;
-            derived.max(f32::EPSILON)
+            (derived > 0.0).then_some(derived)
         })
     }
 }
@@ -74,11 +73,14 @@ pub(crate) fn emit_points_system(
             trail.header.current_time = point.time;
             trail.header.current_length = point.length;
 
-            let spacing = emitter.spacing(&trail.header);
-            let should_emit = emitter
-                .last
-                .as_ref()
-                .is_none_or(|last| (position - last.position).length() >= spacing);
+            let should_emit = match (&emitter.last, emitter.spacing(&trail.header)) {
+                // First point always emits.
+                (None, _) => true,
+                // A distance budget gates emission by how far we've travelled.
+                (Some(last), Some(spacing)) => (position - last.position).length() >= spacing,
+                // No budget to derive spacing from → emit whenever we moved at all.
+                (Some(last), None) => position != last.position,
+            };
 
             if should_emit {
                 // Increment header
@@ -87,11 +89,10 @@ pub(crate) fn emit_points_system(
                 trail.header.length = (trail.header.length + 1).min(capacity);
 
                 // Write new head. `make_mut` only clones the ring when it is still
-                // shared with the render world (i.e. when this trail changed).
+                // shared with the render world (i.e. when this trail changed); the
+                // clone preserves the `len == capacity` invariant, so no resize.
                 let head = trail.header.head as usize;
-                let data = Arc::make_mut(&mut trail.cpu_data);
-                data.resize_with(capacity as usize, Default::default);
-                data[head] = point.clone();
+                Arc::make_mut(&mut trail.cpu_data)[head] = point.clone();
                 emitter.last = Some(point);
             } else if !emitter.lazy {
                 // Overwrite head
