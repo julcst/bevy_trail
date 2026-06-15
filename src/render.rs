@@ -1,86 +1,125 @@
-//! Demonstrates how to enqueue custom draw commands in a render phase.
-//!
-//! This example shows how to use the built-in
-//! [`bevy_render::render_phase::BinnedRenderPhase`] functionality with a
-//! custom [`RenderCommand`] to allow inserting arbitrary GPU drawing logic
-//! into Bevy's pipeline. This is not the only way to add custom rendering code
-//! into Bevy—render nodes are another, lower-level method—but it does allow
-//! for better reuse of parts of Bevy's built-in mesh rendering logic.
+//! Batched trail rendering: all trails are packed into shared GPU storage
+//! buffers and drawn with a single instanced draw call per blend mode, rather
+//! than one draw call + bind group per trail. Geometry is expanded in the
+//! vertex shader (camera-facing billboards), so there are no vertex buffers.
 
-use crate::types::{TrailData, TrailRenderMode};
+use crate::types::{TrailData, TrailHeader, TrailPoint, TrailRenderMode, TrailStyle};
 use bevy::{
     core_pipeline::core_3d::{Opaque3d, Opaque3dBatchSetKey, Opaque3dBinKey, CORE_3D_DEPTH_FORMAT},
     ecs::{
         change_detection::Tick,
         query::ROQueryItem,
-        system::{
-            lifetimeless::{Read, SRes},
-            StaticSystemParam, SystemParamItem,
-        },
+        system::{lifetimeless::SRes, SystemParamItem},
     },
     mesh::PrimitiveTopology,
     prelude::*,
     render::{
-        extract_component::ExtractComponentPlugin,
-        render_asset::RenderAssets,
-        renderer::RenderQueue,
-        storage::GpuShaderStorageBuffer,
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
         render_phase::{
             AddRenderCommand, BinnedRenderPhaseType, DrawFunctions, InputUniformIndex, PhaseItem,
             RenderCommand, RenderCommandResult, SetItemPipeline, TrackedRenderPass,
             ViewBinnedRenderPhases,
         },
         render_resource::{
-            binding_types::uniform_buffer, encase::StorageBuffer as EncaseStorageBuffer,
-            AsBindGroup, BindGroup, BindGroupEntries,
-            BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent, BlendFactor,
-            BlendOperation, BlendState, Canonical, ColorTargetState, ColorWrites, CompareFunction,
+            binding_types::{storage_buffer_read_only_sized, uniform_buffer},
+            encase::StorageBuffer as EncaseStorageBuffer,
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
+            BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor,
+            BufferUsages, Canonical, ColorTargetState, ColorWrites, CompareFunction,
             DepthStencilState, FragmentState, PipelineCache, PrimitiveState, RenderPipeline,
             RenderPipelineDescriptor, ShaderStages, Specializer, SpecializerKey, TextureFormat,
             Variants, VertexState,
         },
-        renderer::RenderDevice,
-        view::{ExtractedView, RenderVisibleEntities, ViewUniform, ViewUniformOffset, ViewUniforms},
+        renderer::{RenderDevice, RenderQueue},
+        sync_world::MainEntity,
+        view::{ExtractedView, ViewUniform, ViewUniformOffset, ViewUniforms},
         Render, RenderApp, RenderSystems,
     },
 };
 
-/// A [`RenderCommand`] that binds the vertex and index buffers and issues the
-/// draw command for our custom phase item.
-struct DrawTrail;
+/// The three blend modes, in [`TrailRenderMode`] discriminant order, so a mode
+/// round-trips through `mode as usize` and back.
+const MODES: [TrailRenderMode; 3] = [
+    TrailRenderMode::Opaque,
+    TrailRenderMode::Additive,
+    TrailRenderMode::Transparent,
+];
 
-impl<P> RenderCommand<P> for DrawTrail
+/// A render-world draw anchor for one blend-mode batch. The renderer owns three
+/// of these (one per [`TrailRenderMode`]), each carrying its mode, and uses them
+/// as the representative entity for that batch's phase item.
+///
+/// They deliberately have no mesh or transform: the binned render phase keeps a
+/// per-`MainEntity` cache shared across all item kinds, so reusing a real trail
+/// entity (which may also render its own mesh) as the representative makes the
+/// trail item and the mesh item fight over one cache slot — dropping both. A
+/// dedicated anchor entity has a `MainEntity` that nothing else uses, so it
+/// never collides.
+#[derive(Component, ExtractComponent, Clone, Copy)]
+struct TrailBatchAnchor;
+
+/// A [`RenderCommand`] that binds the batched trail buffers for one blend mode
+/// and issues a single instanced draw covering every trail in that batch.
+struct DrawTrailBatch;
+
+impl<P> RenderCommand<P> for DrawTrailBatch
 where
     P: PhaseItem,
 {
-    type Param = ();
-
+    type Param = SRes<TrailBatches>;
     type ViewQuery = ();
-
-    type ItemQuery = Read<GpuTrail>;
+    // The phase item's entity is a representative trail; its render mode tells us
+    // which batch this draw is for.
+    type ItemQuery = bevy::ecs::system::lifetimeless::Read<TrailRenderMode>;
 
     fn render<'w>(
         _item: &P,
         _view: ROQueryItem<'w, '_, Self::ViewQuery>,
-        bind_group: Option<&'w GpuTrail>,
-        _param: SystemParamItem<'w, '_, Self::Param>,
+        mode: Option<&'w TrailRenderMode>,
+        param: SystemParamItem<'w, '_, Self::Param>,
         pass: &mut TrackedRenderPass<'w>,
     ) -> RenderCommandResult {
-        let Some(bg) = bind_group else {
-            return RenderCommandResult::Failure("BindGroup missing");
+        let Some(mode) = mode else {
+            return RenderCommandResult::Skip;
         };
+        let batch = &param.into_inner().modes[*mode as usize];
 
-        pass.set_bind_group(1, &bg.value, &[]);
-        pass.draw(0..bg.vertex_count, 0..1);
+        let Some(bind_group) = batch.bind_group.as_ref() else {
+            return RenderCommandResult::Skip;
+        };
+        if batch.instance_count == 0 || batch.max_verts == 0 {
+            return RenderCommandResult::Skip;
+        }
+
+        pass.set_bind_group(1, bind_group, &[]);
+        pass.draw(0..batch.max_verts, 0..batch.instance_count);
 
         RenderCommandResult::Success
     }
 }
 
-#[derive(Component)]
-pub struct GpuTrail {
-    pub value: BindGroup,
-    pub vertex_count: u32,
+/// Per-blend-mode batch of trails: shared GPU buffers, one bind group, and the
+/// instanced draw parameters. Buffers are kept across frames and only grown
+/// (which forces a bind-group rebuild) when the trail count rises.
+#[derive(Default)]
+struct GpuBatch {
+    headers: Option<Buffer>,
+    points: Option<Buffer>,
+    styles: Option<Buffer>,
+    headers_cap: u64,
+    points_cap: u64,
+    styles_cap: u64,
+    bind_group: Option<BindGroup>,
+    /// Number of trails (= instances) in this batch.
+    instance_count: u32,
+    /// Vertices per instance: 2 per ring point, sized to the largest trail.
+    max_verts: u32,
+}
+
+#[derive(Resource, Default)]
+struct TrailBatches {
+    /// One batch per blend mode, indexed by `TrailRenderMode as usize`.
+    modes: [GpuBatch; 3],
 }
 
 /// Holds the bind group for the view uniform (camera matrices), rebuilt each
@@ -99,7 +138,7 @@ where
 {
     type Param = SRes<TrailViewBindGroup>;
 
-    type ViewQuery = Read<ViewUniformOffset>;
+    type ViewQuery = bevy::ecs::system::lifetimeless::Read<ViewUniformOffset>;
 
     type ItemQuery = ();
 
@@ -140,66 +179,150 @@ fn prepare_trail_view_bind_group(
     ));
 }
 
-/// Writes each trail's ring into its persistent GPU storage buffer in place
-/// (`write_buffer`), instead of letting the storage asset reallocate a fresh
-/// buffer on every change. The buffer is created once (with `COPY_DST`) in
-/// `init_trails`; here we just re-encode the points into a reused scratch buffer
-/// and queue a copy. Eliminating the per-frame GPU reallocation is what removes
-/// the multi-trail stutter.
-fn update_trail_storage(
-    render_queue: Res<RenderQueue>,
-    gpu_buffers: Res<RenderAssets<GpuShaderStorageBuffer>>,
-    query: Query<&TrailData>,
-    mut scratch: Local<Vec<u8>>,
-) {
-    for trail in query.iter() {
-        let Some(gpu) = gpu_buffers.get(&trail.data) else {
-            continue;
-        };
-
-        scratch.clear();
-        {
-            let mut wrapper = EncaseStorageBuffer::new(&mut *scratch);
-            wrapper.write(&trail.cpu_data).unwrap();
-        }
-
-        render_queue.write_buffer(&gpu.buffer, 0, &scratch);
-    }
+/// Scratch accumulators for building one batch, reused across frames.
+#[derive(Default)]
+struct BatchScratch {
+    headers: Vec<TrailHeader>,
+    points: Vec<TrailPoint>,
+    styles: Vec<TrailStyle>,
+    bytes: Vec<u8>,
 }
 
-// TODO: only rebuild bind groups when the data changes
-fn prepare_trail_bind_groups(
-    mut commands: Commands,
+/// Packs every trail into per-mode shared storage buffers (headers, ring points,
+/// styles) and uploads them, ready for one instanced draw per mode.
+fn prepare_trail_batches(
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    pipeline: Res<TrailPipeline>,
     pipeline_cache: Res<PipelineCache>,
-    mut param: StaticSystemParam<<TrailData as AsBindGroup>::Param>,
-    // Query extracted trail data and refresh bind groups each frame.
-    query: Query<(Entity, &TrailData), Changed<TrailData>>,
+    mut batches: ResMut<TrailBatches>,
+    trails: Query<(&TrailData, &TrailRenderMode)>,
+    mut scratch: Local<[BatchScratch; 3]>,
 ) {
-    for (entity, trail) in query.iter() {
-        let layout_descriptor = TrailData::bind_group_layout_descriptor(&render_device);
+    for s in scratch.iter_mut() {
+        s.headers.clear();
+        s.points.clear();
+        s.styles.clear();
+    }
 
-        if let Ok(prepared) = trail.as_bind_group(
-            &layout_descriptor,
+    let mut max_verts = [0u32; 3];
+
+    for (trail, mode) in &trails {
+        let m = *mode as usize;
+        let s = &mut scratch[m];
+
+        let mut header = trail.header.clone();
+        header.offset = s.points.len() as u32;
+        s.headers.push(header);
+        s.styles.push(trail.style.clone());
+        s.points.extend_from_slice(&trail.cpu_data);
+
+        max_verts[m] = max_verts[m].max(trail.header.capacity * 2);
+    }
+
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline.batch_layout);
+
+    for m in 0..3 {
+        let s = &mut scratch[m];
+        let batch = &mut batches.modes[m];
+
+        batch.instance_count = s.headers.len() as u32;
+        batch.max_verts = max_verts[m];
+
+        if s.headers.is_empty() {
+            batch.bind_group = None;
+            continue;
+        }
+
+        let h = ensure_and_write(
             &render_device,
-            &pipeline_cache,
-            &mut param,
-        ) {
-            commands.entity(entity).insert(GpuTrail {
-                value: prepared.bind_group,
-                vertex_count: trail.header.length * 2, // 2 vertices per point
-            });
+            &render_queue,
+            &mut batch.headers,
+            &mut batch.headers_cap,
+            &s.headers,
+            &mut s.bytes,
+            "trail_batch_headers",
+        );
+        let p = ensure_and_write(
+            &render_device,
+            &render_queue,
+            &mut batch.points,
+            &mut batch.points_cap,
+            &s.points,
+            &mut s.bytes,
+            "trail_batch_points",
+        );
+        let st = ensure_and_write(
+            &render_device,
+            &render_queue,
+            &mut batch.styles,
+            &mut batch.styles_cap,
+            &s.styles,
+            &mut s.bytes,
+            "trail_batch_styles",
+        );
+
+        // Only rebuild the bind group when a buffer was (re)allocated.
+        if h || p || st || batch.bind_group.is_none() {
+            batch.bind_group = Some(render_device.create_bind_group(
+                "trail_batch_bind_group",
+                &layout,
+                &BindGroupEntries::sequential((
+                    batch.headers.as_ref().unwrap().as_entire_binding(),
+                    batch.points.as_ref().unwrap().as_entire_binding(),
+                    batch.styles.as_ref().unwrap().as_entire_binding(),
+                )),
+            ));
         }
     }
 }
 
-/// The custom draw commands that Bevy executes for each entity we enqueue into
-/// the render phase.
-type DrawTrailCommands = (
-    SetItemPipeline,
-    SetTrailViewBindGroup<0>,
-    DrawTrail,
-);
+/// Encodes `data` (a `ShaderType` array) into `scratch`, ensures `buffer` is at
+/// least that large (reallocating with growth headroom if not), and queues the
+/// upload. Returns `true` if the buffer was reallocated (so the caller knows to
+/// rebuild the bind group).
+fn ensure_and_write<T>(
+    render_device: &RenderDevice,
+    render_queue: &RenderQueue,
+    buffer: &mut Option<Buffer>,
+    capacity: &mut u64,
+    data: &Vec<T>,
+    scratch: &mut Vec<u8>,
+    label: &'static str,
+) -> bool
+where
+    T: bevy::render::render_resource::ShaderType
+        + bevy::render::render_resource::encase::ShaderSize
+        + bevy::render::render_resource::encase::internal::WriteInto,
+{
+    scratch.clear();
+    {
+        let mut wrapper = EncaseStorageBuffer::new(&mut *scratch);
+        wrapper.write(data).unwrap();
+    }
+    let size = scratch.len() as u64;
+
+    let mut reallocated = false;
+    if buffer.is_none() || *capacity < size {
+        // Grow with 50% headroom so a steadily increasing trail count doesn't
+        // reallocate every frame.
+        let new_cap = (size + size / 2).max(size);
+        *buffer = Some(render_device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: new_cap,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        *capacity = new_cap;
+        reallocated = true;
+    }
+
+    render_queue.write_buffer(buffer.as_ref().unwrap(), 0, scratch);
+    reallocated
+}
+
+/// The custom draw commands Bevy executes for each batch phase item.
+type DrawTrailCommands = (SetItemPipeline, SetTrailViewBindGroup<0>, DrawTrailBatch);
 
 pub struct TrailRenderPlugin;
 
@@ -209,19 +332,28 @@ impl Plugin for TrailRenderPlugin {
         app.add_plugins((
             ExtractComponentPlugin::<TrailData>::default(),
             ExtractComponentPlugin::<TrailRenderMode>::default(),
+            ExtractComponentPlugin::<TrailBatchAnchor>::default(),
         ));
+
+        // One renderer-owned anchor entity per blend mode. These carry only the
+        // mode (no mesh/transform) and serve as the representative entity for
+        // each batch's phase item, so the binned phase never confuses a batch
+        // with a real trail entity's own rendering.
+        for mode in MODES {
+            app.world_mut().spawn((mode, TrailBatchAnchor));
+        }
 
         // Render World
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .add_render_command::<Opaque3d, DrawTrailCommands>()
             .init_resource::<TrailViewBindGroup>()
+            .init_resource::<TrailBatches>()
             .add_systems(
                 Render,
                 (
-                    update_trail_storage.in_set(RenderSystems::PrepareResources),
-                    (prepare_trail_bind_groups, prepare_trail_view_bind_group)
-                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_trail_batches.in_set(RenderSystems::PrepareResources),
+                    prepare_trail_view_bind_group.in_set(RenderSystems::PrepareBindGroups),
                     queue_custom_phase_item.in_set(RenderSystems::Queue),
                 ),
             );
@@ -234,36 +366,41 @@ impl Plugin for TrailRenderPlugin {
     }
 }
 
-/// A render-world system that enqueues the entity with custom rendering into
-/// the opaque render phases of each view.
+/// Enqueues one batched phase item per (view, non-empty blend mode). Each item
+/// expands into a single instanced draw covering all trails of that mode.
 fn queue_custom_phase_item(
     pipeline_cache: Res<PipelineCache>,
     mut pipeline: ResMut<TrailPipeline>,
     mut opaque_render_phases: ResMut<ViewBinnedRenderPhases<Opaque3d>>,
     opaque_draw_functions: Res<DrawFunctions<Opaque3d>>,
-    views: Query<(&ExtractedView, &RenderVisibleEntities, &Msaa)>,
-    trail_modes: Query<&TrailRenderMode>,
+    batches: Res<TrailBatches>,
+    anchors: Query<(Entity, &MainEntity, &TrailRenderMode), With<TrailBatchAnchor>>,
+    views: Query<(&ExtractedView, &Msaa)>,
     mut next_tick: Local<Tick>,
 ) {
     let draw_custom_phase_item = opaque_draw_functions.read().id::<DrawTrailCommands>();
 
-    // Render phases are per-view, so we need to iterate over all views so that
-    // the entity appears in them. (In this example, we have only one view, but
-    // it's good practice to loop over all views anyway.)
-    for (view, view_visible_entities, msaa) in views.iter() {
+    // The renderer-owned anchor entity that represents each blend mode's batch.
+    let mut anchor_by_mode: [Option<(Entity, MainEntity)>; 3] = [None; 3];
+    for (entity, main, mode) in anchors.iter() {
+        anchor_by_mode[*mode as usize] = Some((entity, *main));
+    }
+
+    for (view, msaa) in views.iter() {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
             continue;
         };
 
-        // Find all the custom rendered entities that are visible from this
-        // view.
-        for &entity in view_visible_entities.get::<TrailData>().iter() {
-            // Ordinarily, the [`SpecializedRenderPipeline::Key`] would contain
-            // some per-view settings, such as whether the view is HDR, but for
-            // simplicity's sake we simply hard-code the view's characteristics,
-            // with the exception of number of MSAA samples and the trail's own
-            // blend mode.
-            let mode = trail_modes.get(entity.0).copied().unwrap_or_default();
+        for m in 0..3 {
+            let batch = &batches.modes[m];
+            if batch.instance_count == 0 {
+                continue;
+            }
+            let Some(representative) = anchor_by_mode[m] else {
+                continue;
+            };
+
+            let mode = MODES[m];
             let Ok(pipeline_id) = pipeline
                 .variants
                 .specialize(&pipeline_cache, TrailPipelineKey { msaa: *msaa, mode })
@@ -275,14 +412,6 @@ fn queue_custom_phase_item(
             let this_tick = next_tick.get() + 1;
             next_tick.set(this_tick);
 
-            // Add the custom render item. We use the
-            // [`BinnedRenderPhaseType::NonMesh`] type to skip the special
-            // handling that Bevy has for meshes (preprocessing, indirect
-            // draws, etc.)
-            //
-            // The asset ID is arbitrary; we simply use [`AssetId::invalid`],
-            // but you can use anything you like. Note that the asset ID need
-            // not be the ID of a [`Mesh`].
             opaque_phase.add(
                 Opaque3dBatchSetKey {
                     draw_function: draw_custom_phase_item,
@@ -295,7 +424,7 @@ fn queue_custom_phase_item(
                 Opaque3dBinKey {
                     asset_id: AssetId::<Mesh>::invalid().untyped(),
                 },
-                entity,
+                representative,
                 InputUniformIndex::default(),
                 BinnedRenderPhaseType::NonMesh,
                 *next_tick,
@@ -310,14 +439,15 @@ struct TrailPipeline {
     variants: Variants<RenderPipeline, TrailPipelineSpecializer>,
     /// Layout for the view uniform bind group (group 0).
     view_layout: BindGroupLayoutDescriptor,
+    /// Layout for the batched trail buffers bind group (group 1).
+    batch_layout: BindGroupLayoutDescriptor,
 }
 
 impl FromWorld for TrailPipeline {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         let shader = asset_server.load("shaders/trail_drawing.wgsl");
-        let render_device = world.resource::<RenderDevice>();
-        let material_layout = TrailData::bind_group_layout_descriptor(render_device);
+
         let view_layout = BindGroupLayoutDescriptor::new(
             "trail_view_layout",
             &BindGroupLayoutEntries::single(
@@ -326,18 +456,30 @@ impl FromWorld for TrailPipeline {
             ),
         );
 
+        // group 1: headers, points, styles — all read-only storage arrays.
+        let batch_layout = BindGroupLayoutDescriptor::new(
+            "trail_batch_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::VERTEX_FRAGMENT,
+                (
+                    storage_buffer_read_only_sized(false, None),
+                    storage_buffer_read_only_sized(false, None),
+                    storage_buffer_read_only_sized(false, None),
+                ),
+            ),
+        );
+
         let base_descriptor = RenderPipelineDescriptor {
-            label: Some("custom render pipeline".into()),
-            layout: vec![view_layout.clone(), material_layout],
+            label: Some("trail render pipeline".into()),
+            layout: vec![view_layout.clone(), batch_layout.clone()],
             vertex: VertexState {
                 shader: shader.clone(),
-                // No buffers
+                // No vertex buffers; geometry is generated in the shader.
                 ..default()
             },
             primitive: PrimitiveState {
                 topology: PrimitiveTopology::TriangleStrip,
                 cull_mode: None,
-                // polygon_mode: PolygonMode::Line,
                 ..default()
             },
             fragment: Some(FragmentState {
@@ -369,6 +511,7 @@ impl FromWorld for TrailPipeline {
         Self {
             variants,
             view_layout,
+            batch_layout,
         }
     }
 }
@@ -395,7 +538,7 @@ impl Specializer<RenderPipeline> for TrailPipelineSpecializer {
         // outputs straight (non-premultiplied) color, so additive scales the
         // contribution by alpha and transparent uses standard alpha blending.
         let blend = match key.mode {
-            TrailRenderMode::Normal => None,
+            TrailRenderMode::Opaque => None,
             TrailRenderMode::Additive => Some(BlendState {
                 color: BlendComponent {
                     src_factor: BlendFactor::SrcAlpha,

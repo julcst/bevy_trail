@@ -26,15 +26,15 @@ use bevy::{
     ui_widgets::{observe, RadioGroup, ValueChange},
 };
 use bevy_trail::prelude::*;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
-const TRAIL_COUNT: usize = 42;
+const TRAIL_COUNT: usize = 300;
 const TRAIL_CAPACITY: u32 = 512;
 const CAMERA_RADIUS: f32 = 6.0;
 
 // Additive + smooth shows off both alpha blending and the rounded cross-section
 // out of the box; the matching radio buttons start checked.
-const INITIAL_MODE: TrailRenderMode = TrailRenderMode::Additive;
+const INITIAL_MODE: TrailRenderMode = TrailRenderMode::Transparent;
 const INITIAL_PROFILE: TrailProfile = TrailProfile::Smooth;
 
 fn main() {
@@ -118,14 +118,14 @@ fn setup(
             INITIAL_MODE,
             TrailEmitter::default(),
             pendulum,
-            // A small unlit ball marks the head of the trail.
-            children![(
-                Mesh3d(ball.clone()),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    emissive: color.into(),
-                    ..default()
-                })),
-            )],
+            // A small unlit ball marks the head of the trail. It lives on the
+            // *same* entity as the emitter — a trail is not a render object, so
+            // it never conflicts with the entity's own mesh.
+            Mesh3d(ball.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                emissive: color.into(),
+                ..default()
+            })),
         ));
     }
 
@@ -182,9 +182,9 @@ fn setup_ui(mut commands: Commands) {
             (
                 radio_group(),
                 children![
-                    setting_radio(Mode(Normal), "Normal"),
-                    (setting_radio(Mode(Additive), "Additive"), Checked),
-                    setting_radio(Mode(Transparent), "Transparent"),
+                    setting_radio(Mode(Opaque), "Opaque"),
+                    setting_radio(Mode(Additive), "Additive"),
+                    (setting_radio(Mode(Transparent), "Transparent"), Checked),
                 ],
             ),
             (Text::new("Profile"), ThemedText),

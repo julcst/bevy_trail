@@ -2,15 +2,19 @@
 //!
 //! This crate provides a reusable trail rendering system that:
 //! - Stores trail control points in fixed-capacity ring storage (`capacity`, `head`, `len`)
-//! - Uploads ring data to GPU storage buffers
+//! - Packs every trail into shared GPU buffers drawn by a single instanced pass
 //! - Expands geometry in the vertex shader for camera-facing billboards
 //! - Exposes metadata for procedural shading
+//!
+//! A trail is plain data, not a render object, so [`TrailEmitter`](emitter::TrailEmitter)
+//! can be added to any existing entity (even one with its own mesh) without
+//! interfering with how that entity renders.
 //!
 //! # Quick Start
 //!
 //! Add [`TrailPlugin`], then spawn anything with a [`Transform`] and a
-//! [`TrailEmitter`](emitter::TrailEmitter) — the plugin allocates the GPU
-//! buffers, maintains the bounding box for frustum culling, and renders it.
+//! [`TrailEmitter`](emitter::TrailEmitter) — the plugin samples its path and
+//! renders it as part of the global trail batch.
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -32,12 +36,7 @@ pub mod emitter;
 pub mod render;
 pub mod types;
 
-use bevy::{
-    camera::primitives::Aabb,
-    math::Vec3A,
-    prelude::*,
-    render::{render_resource::BufferUsages, storage::ShaderStorageBuffer},
-};
+use bevy::prelude::*;
 
 use crate::{
     emitter::emit_points_system,
@@ -56,16 +55,16 @@ pub mod prelude {
 /// System ordering within [`Update`] for the trail lifecycle.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TrailSystems {
-    /// Allocates GPU buffers and inserts [`TrailData`] for new trails.
+    /// Inserts the internal [`TrailData`] for new trails.
     Init,
     /// Produces new trail points (e.g. from emitters).
     Emit,
-    /// Mirrors CPU-side state into GPU buffers and bounding boxes.
+    /// Mirrors user-facing component state into [`TrailData`].
     Sync,
 }
 
-/// Adds everything needed to spawn and render trails: emission, GPU buffer
-/// management, bounding-box upkeep, and the render pipeline.
+/// Adds everything needed to spawn and render trails: emission, trail-state
+/// upkeep, and the batched render pipeline.
 pub struct TrailPlugin;
 
 impl Plugin for TrailPlugin {
@@ -80,31 +79,23 @@ impl Plugin for TrailPlugin {
                 (
                     init_trails.in_set(TrailSystems::Init),
                     emit_points_system.in_set(TrailSystems::Emit),
-                    (sync_trail_style, update_trail_aabb).in_set(TrailSystems::Sync),
+                    sync_trail_style.in_set(TrailSystems::Sync),
                 ),
             );
     }
 }
 
-/// Allocates the GPU storage buffer and inserts the internal [`TrailData`] for
-/// any entity that has a [`Trail`] but isn't initialized yet.
+/// Inserts the internal [`TrailData`] for any entity that has a [`Trail`] but
+/// isn't initialized yet. No GPU buffers are allocated here: the renderer packs
+/// every trail's points into shared batched buffers each frame (see
+/// [`crate::render`]).
 fn init_trails(
     mut commands: Commands,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     query: Query<(Entity, &Trail, &TrailStyle), Without<TrailData>>,
 ) {
     for (entity, trail, style) in &query {
         let capacity = trail.capacity.max(1);
         let cpu_data = vec![TrailPoint::default(); capacity as usize];
-
-        // Allocate the GPU buffer once. `COPY_DST` lets the render world
-        // overwrite its contents in place every frame via
-        // `RenderQueue::write_buffer` (see `update_trail_storage`), instead of
-        // reallocating a fresh buffer through `set_data` — the reallocation was
-        // the cause of the multi-trail stutter.
-        let mut storage = ShaderStorageBuffer::from(cpu_data.clone());
-        storage.buffer_description.usage |= BufferUsages::COPY_DST;
-        let data = buffers.add(storage);
 
         commands.entity(entity).insert(TrailData {
             header: TrailHeader {
@@ -113,7 +104,6 @@ fn init_trails(
                 max_time: trail.max_time,
                 ..default()
             },
-            data,
             cpu_data,
             style: style.clone(),
         });
@@ -125,36 +115,5 @@ fn init_trails(
 fn sync_trail_style(mut query: Query<(&TrailStyle, &mut TrailData), Changed<TrailStyle>>) {
     for (style, mut data) in &mut query {
         data.style = style.clone();
-    }
-}
-
-/// Keeps each trail's [`Aabb`] in sync with its live points so Bevy's normal
-/// frustum culling works without the user maintaining a bounding box.
-///
-/// Trail points are stored in world space, but Bevy culls using a *local-space*
-/// `Aabb` transformed by the entity's [`GlobalTransform`]. We therefore pull the
-/// world points back into local space before computing the box, and pad it by
-/// the trail's half-width to account for the ribbon expanded in the shader.
-fn update_trail_aabb(
-    mut query: Query<(&GlobalTransform, &TrailData, &mut Aabb), Changed<TrailData>>,
-) {
-    for (global, trail, mut aabb) in &mut query {
-        let header = &trail.header;
-        if header.capacity == 0 {
-            continue;
-        }
-
-        let to_local = global.affine().inverse();
-        let local_points = (0..header.length).map(|i| {
-            let idx = ((header.head + header.capacity - i) % header.capacity) as usize;
-            to_local.transform_point3(trail.cpu_data[idx].position)
-        });
-
-        if let Some(mut bounds) = Aabb::enclosing(local_points) {
-            // Pad by the trail half-width to cover the ribbon the shader expands.
-            let pad = trail.style.start_width.max(trail.style.end_width).max(0.0);
-            bounds.half_extents += Vec3A::splat(pad);
-            *aabb = bounds;
-        }
     }
 }

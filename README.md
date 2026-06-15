@@ -5,6 +5,6 @@ Renders efficient trail ring buffers directly without vertex buffers to achieve 
 
 ## TODO
 
-[ ] Move trail data to child
-[ ] Batch draw calls
-[ ] Shaded trails
+- [ ] Move trail data to child
+- [X] Batch draw calls
+- [ ] Shaded trails

@@ -1,16 +1,8 @@
 //! Core data types for trail rendering.
 
 use bevy::{
-    camera::{
-        primitives::Aabb,
-        visibility::{self, VisibilityClass},
-    },
     prelude::*,
-    render::{
-        extract_component::ExtractComponent,
-        render_resource::{AsBindGroup, ShaderType},
-        storage::ShaderStorageBuffer,
-    },
+    render::{extract_component::ExtractComponent, render_resource::ShaderType},
 };
 
 /// Cross-section shape of the trail ribbon.
@@ -39,7 +31,7 @@ pub enum TrailProfile {
 pub enum TrailRenderMode {
     /// Opaque: alpha is ignored and the trail overwrites whatever is behind it.
     #[default]
-    Normal,
+    Opaque,
     /// Additive: the trail's color is added to the frame, scaled by its alpha.
     /// Great for glowing, energetic effects; order-independent.
     Additive,
@@ -98,10 +90,12 @@ pub struct TrailPoint {
 
 /// User-facing configuration for a trail.
 ///
-/// Add this to any entity (together with a [`Transform`]) and the plugin takes
-/// care of the rest: allocating the GPU buffers, maintaining the bounding box
-/// for frustum culling, and rendering. To have the trail follow the entity
-/// automatically, also add a [`TrailEmitter`](crate::emitter::TrailEmitter).
+/// Add it to **any** entity that has a [`Transform`] — including one that already
+/// has its own [`Mesh3d`](bevy::prelude::Mesh3d), camera, or gameplay components.
+/// A trail is *not* a render object: its points are sampled in world space and
+/// drawn by a single global batched pass, so attaching one never interferes with
+/// the entity's own rendering. To have the trail follow the entity automatically,
+/// also add a [`TrailEmitter`](crate::emitter::TrailEmitter).
 ///
 /// ```no_run
 /// # use bevy::prelude::*;
@@ -121,7 +115,7 @@ pub struct TrailPoint {
 /// # }
 /// ```
 #[derive(Component, Clone, Debug)]
-#[require(Transform, Visibility, TrailStyle, TrailRenderMode)]
+#[require(Transform, TrailStyle, TrailRenderMode)]
 pub struct Trail {
     /// Maximum number of points retained in the ring buffer.
     pub capacity: u32,
@@ -177,6 +171,9 @@ pub struct TrailHeader {
     pub current_length: f32,
     /// Set to 0 to disable length-based clipping
     pub max_length: f32,
+    /// Base index of this trail's points within the batched `points` storage
+    /// buffer. Set by the renderer while building the draw batch; `0` otherwise.
+    pub offset: u32,
 }
 
 impl Default for TrailHeader {
@@ -189,42 +186,41 @@ impl Default for TrailHeader {
             max_time: 1.0,
             current_length: 0.0,
             max_length: 1.0,
+            offset: 0,
         }
     }
 }
 
-/// Internal GPU mirror of a trail: the ring buffer, its header, and a copy of
-/// the style, bundled for binding.
+/// The renderable state of a trail: its world-space ring buffer, the header
+/// describing the live segment, and a copy of the style.
+///
+/// This is a plain data component, **not** a render object — it carries no
+/// `Visibility`, `Aabb`, or visibility class. Every frame the renderer simply
+/// collects the [`TrailData`] of all trails and packs them into shared GPU
+/// buffers for one batched instanced draw (see [`crate::render`]), so a trail
+/// adds no per-entity draw, bind group, or culling bookkeeping.
 ///
 /// The plugin inserts and maintains this automatically from [`Trail`] and
 /// [`TrailStyle`]; you normally never construct it yourself. It is public only
-/// for advanced, low-level use (e.g. feeding a pre-baked, static trail).
-///
-/// The frustum-culling components ([`Visibility`], [`Aabb`], [`VisibilityClass`])
-/// live here, on the component that is actually rendered, so culling works
-/// without any setup from the user.
-#[derive(AsBindGroup, Clone, Component, Default)]
-#[require(Transform, Visibility, Aabb, VisibilityClass)]
-#[component(on_add = visibility::add_visibility_class::<TrailData>)]
+/// for advanced, low-level use (e.g. feeding a pre-baked, static trail), in
+/// which case [`TrailRenderMode`] is supplied for you via `#[require]`.
+#[derive(Clone, Component, Default)]
+#[require(TrailRenderMode)]
 pub struct TrailData {
-    #[uniform(0)]
     pub header: TrailHeader,
-    #[storage(1, read_only)]
-    pub data: Handle<ShaderStorageBuffer>,
+    /// Live ring-buffer points, in **world space**. The renderer concatenates
+    /// these across all trails into one shared GPU buffer and draws them in a
+    /// single instanced draw call (see [`crate::render`]).
     pub cpu_data: Vec<TrailPoint>,
-    #[uniform(2)]
     pub style: TrailStyle,
 }
 
 /// Extract [`TrailData`] into the render world.
 ///
-/// The ring points (`cpu_data`) are carried across so the render world can write
-/// them into each trail's *persistent* GPU storage buffer in place every frame
-/// (see `update_trail_storage`), rather than having the storage asset reallocate
-/// a fresh GPU buffer on every change. A controlled A/B benchmark showed this
-/// path is faster across all trail counts and, crucially, removes the
-/// reallocation stalls that caused the multi-trail stutter (occasional 30ms+
-/// p99 / 300ms frame spikes).
+/// The ring points (`cpu_data`) are carried across so the renderer can pack
+/// every trail's points into one shared GPU buffer and draw them all in a single
+/// instanced draw call (see [`crate::render`]). This avoids both per-frame GPU
+/// buffer reallocation and one draw call + bind group per trail.
 impl ExtractComponent for TrailData {
     type QueryData = &'static TrailData;
     type QueryFilter = ();
@@ -235,7 +231,6 @@ impl ExtractComponent for TrailData {
     ) -> Option<Self::Out> {
         Some(TrailData {
             header: item.header.clone(),
-            data: item.data.clone(),
             cpu_data: item.cpu_data.clone(),
             style: item.style.clone(),
         })

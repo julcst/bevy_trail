@@ -3,12 +3,12 @@
 //! Most users should reach for [`Trail`] + [`TrailEmitter`] (see
 //! `emitter_test`). This example instead inserts the internal [`TrailData`]
 //! directly to show the escape hatch for feeding custom, pre-computed geometry.
-//! Visibility and frustum culling are still handled for you — no `Aabb` or
-//! `NoFrustumCulling` needed.
+//! The points are world-space and drawn by the global batched pass, so no
+//! `Transform`, `Visibility`, or `Aabb` is needed.
 
 use std::f32::consts::TAU;
 
-use bevy::{prelude::*, render::storage::ShaderStorageBuffer};
+use bevy::prelude::*;
 use bevy_trail::{
     types::{TrailData, TrailHeader, TrailPoint, TrailStyle},
     TrailPlugin,
@@ -22,7 +22,7 @@ fn main() {
 }
 
 /// Spawns the objects in the scene.
-fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>>) {
+fn setup(mut commands: Commands) {
     // Generate sine wave
     let n = 128;
     let cpu_data = (0..n)
@@ -37,10 +37,8 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
         })
         .collect::<Vec<_>>();
 
-    let data = buffers.add(ShaderStorageBuffer::from(cpu_data.clone()));
-
-    // A bare `TrailData` is enough; `Transform`, `Visibility`, `Aabb` and the
-    // visibility class are pulled in automatically.
+    // A bare `TrailData` is enough — the renderer batches its world-space points
+    // into the shared GPU buffers. `TrailRenderMode` is supplied via `#[require]`.
     commands.spawn(TrailData {
         header: TrailHeader {
             head: n - 1,
@@ -50,8 +48,8 @@ fn setup(mut commands: Commands, mut buffers: ResMut<Assets<ShaderStorageBuffer>
             max_time: 1.0,
             current_length: 1.0,
             current_time: 1.0,
+            ..default()
         },
-        data,
         cpu_data,
         style: TrailStyle {
             start_color: LinearRgba::WHITE,
